@@ -19,11 +19,23 @@ from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
 from .data import read_patient, features
+from .evaluate import bootstrap, calibration, normalized_utility, patient_groups, utility_by_patient
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "2")
 
 
-def split_patients(manifest, seed):
+def split_patients(manifest, seed, scheme="random"):
+    """Patient-disjoint splits. "site" holds out an entire source site instead of random patients."""
+    if scheme == "site":
+        site = manifest.patient.str.split("/").str[0]
+        if site.nunique() < 2:
+            raise ValueError("Site-held-out split needs patients from at least two sites")
+        holdout = sorted(site.unique())[-1]
+        develop, test = manifest[site != holdout], manifest[site == holdout]
+        train, val = train_test_split(develop, test_size=.25, random_state=seed, stratify=develop.ever_sepsis)
+        return {"train": train, "validation": val, "test": test}
+    if scheme != "random":
+        raise ValueError(f"Unknown split scheme: {scheme}")
     train, rest = train_test_split(manifest, test_size=.4, random_state=seed, stratify=manifest.ever_sepsis)
     val, test = train_test_split(rest, test_size=.5, random_state=seed, stratify=rest.ever_sepsis)
     return {"train": train, "validation": val, "test": test}
@@ -36,6 +48,7 @@ def threshold_for(y, p):
 
 
 def metrics(y, p, threshold, ids):
+    y, p = np.asarray(y), np.asarray(p, dtype=float)
     pred = p >= threshold
     tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
     patients = pd.DataFrame({"id": ids, "label": y, "alert": pred}).groupby("id").max()
@@ -47,10 +60,12 @@ def metrics(y, p, threshold, ids):
                 precision=float(tp / max(tp + fp, 1)), recall=float(tp / max(tp + fn, 1)),
                 confusion=dict(tn=int(tn), fp=int(fp), fn=int(fn), tp=int(tp)),
                 alert_hours_per_100=float(100 * pred.mean()),
-                nonsepsis_patients_with_any_alert=float(negative.alert.mean()) if len(negative) else None)
+                nonsepsis_patients_with_any_alert=float(negative.alert.mean()) if len(negative) else None,
+                normalized_utility=normalized_utility(*utility_by_patient(y, pred, patient_groups(ids))),
+                calibration=calibration(y, p))
 
 
-def train(root, output, limit=2000, seed=42):
+def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
     root, output = Path(root), Path(output)
     if output.exists():
         raise ValueError("Use a new output directory to preserve previous experiments")
@@ -72,10 +87,12 @@ def train(root, output, limit=2000, seed=42):
     manifest = pd.DataFrame(records)
     if manifest.ever_sepsis.value_counts().min() < 10 or manifest.ever_sepsis.nunique() != 2:
         raise ValueError("Need at least 10 patients of each class; increase --limit")
-    splits = split_patients(manifest, seed)
+    splits = split_patients(manifest, seed, scheme)
     output.mkdir(parents=True)
     arrays = {}
     for name, subset in splits.items():
+        if subset.ever_sepsis.nunique() != 2:
+            raise ValueError(f"Split '{name}' lacks both classes; increase --limit or use --split random")
         subset.sort_values("patient").to_csv(output / f"{name}_patients.csv", index=False)
         dfs = [frames[p] for p in subset.patient]
         arrays[name] = (pd.concat([features(df) for df in dfs], ignore_index=True),
@@ -87,7 +104,7 @@ def train(root, output, limit=2000, seed=42):
         "logistic": make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler(), LogisticRegression(max_iter=1000, random_state=seed)),
         "boosting": HistGradientBoostingClassifier(max_iter=100, max_leaf_nodes=15, l2_regularization=1, early_stopping=False, random_state=seed),
     }
-    report = dict(seed=seed, selected_patients=len(paths), available_patients=len(list(root.glob("site_*/*.psv"))))
+    report = dict(seed=seed, split=scheme, selected_patients=len(paths), available_patients=len(list(root.glob("site_*/*.psv"))))
     report.update(python=platform.python_version(), sklearn=sklearn.__version__, models={}, scope="ICU retrospective development only; not ER validation")
     report["source_sha256"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in sorted(Path(__file__).parent.glob("*.py"))}
@@ -111,6 +128,7 @@ def train(root, output, limit=2000, seed=42):
             p = model.predict_proba(tx)[:, 1]
             threshold = report["models"][name]["validation"]["threshold"]
             report["models"][name]["test"] = metrics(ty, p, threshold, ti)
+            report["models"][name]["test"]["bootstrap"] = bootstrap(ty, p, threshold, ti, seed=seed, draws=draws)
             if name == selected:
                 pd.DataFrame(dict(patient=ti, label=ty, score=p)).to_csv(output / "test_predictions.csv", index=False)
     (output / "metrics.json").write_text(json.dumps(report, indent=2, allow_nan=False))

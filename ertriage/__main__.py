@@ -17,6 +17,9 @@ def main():
     t.add_argument("--out", default="artifacts/baseline")
     t.add_argument("--limit", type=int, default=2000, help="Random patient subset; 0 means all")
     t.add_argument("--seed", type=int, default=42)
+    t.add_argument("--split", choices=["random", "site"], default="random",
+                   help="random patient split, or hold out an entire source site")
+    t.add_argument("--draws", type=int, default=1000, help="Patient bootstrap resamples for held-out intervals")
     r = sub.add_parser("replay")
     r.add_argument("--data", default="data/physionet2019")
     r.add_argument("--run", default="artifacts/baseline")
@@ -30,7 +33,9 @@ def main():
         elif args.command == "train":
             if args.limit < 0:
                 parser.error("--limit must be nonnegative")
-            train(args.data, args.out, args.limit, args.seed)
+            if args.draws < 1:
+                parser.error("--draws must be positive")
+            train(args.data, args.out, args.limit, args.seed, args.split, args.draws)
         else:
             replay(args.data, args.run, args.patient)
     except (ValueError, FileNotFoundError) as exc:
