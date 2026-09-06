@@ -279,10 +279,12 @@ def test_stable_selection_steps_back_only_on_indistinguishable_margins():
     chosen, decision = select_model({"logistic": logistic, "boosting": boosting}, y, ids, seed=42, draws=200)
     assert decision["leader"] == "boosting" and chosen == "logistic"
     assert decision["stepped_back_to"] == "logistic"
-    margin = decision["average_precision_difference"]
+    margin = decision["average_precision_margins"]["logistic"]
     assert margin["observed"] > 0 and margin["low"] <= 0 <= margin["high"]
 
     separated = {"logistic": np.clip(.05 + rng.normal(0, .05, len(y)), 0, 1),
                  "boosting": np.clip(.05 + .3 * y + rng.normal(0, .05, len(y)), 0, 1)}
     clear, decision = select_model(separated, y, ids, seed=42, draws=200)
     assert clear == "boosting" and decision["stepped_back_to"] is None
+    # Refusing to step back records the margin that justified it.
+    assert decision["average_precision_margins"]["logistic"]["low"] > 0

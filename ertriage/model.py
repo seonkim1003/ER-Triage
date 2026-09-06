@@ -92,14 +92,17 @@ def select_model(scores, y, ids, order=SELECTION_ORDER, seed=42, draws=1000):
     tie-breaking convention, not evidence that the simpler model generalizes.
     """
     leader = max(order, key=lambda name: average_precision_score(y, scores[name]))
+    margins = {}
     for name in order:
         if name == leader:
-            return leader, dict(rule="stable", leader=leader, chosen=leader, stepped_back_to=None)
-        interval = paired_difference(y, scores[leader], scores[name], ids, seed=seed, draws=draws)
-        if interval and interval["low"] <= 0 <= interval["high"]:
+            break
+        margins[name] = paired_difference(y, scores[leader], scores[name], ids, seed=seed, draws=draws)
+        if margins[name] and margins[name]["low"] <= 0 <= margins[name]["high"]:
             return name, dict(rule="stable", leader=leader, chosen=name, stepped_back_to=name,
-                              average_precision_difference=interval)
-    return leader, dict(rule="stable", leader=leader, chosen=leader, stepped_back_to=None)
+                              average_precision_margins=margins)
+    # Declining to step back is a finding too, so the margins that justified it are always recorded.
+    return leader, dict(rule="stable", leader=leader, chosen=leader, stepped_back_to=None,
+                        average_precision_margins=margins)
 
 
 def metrics(y, p, threshold, ids):

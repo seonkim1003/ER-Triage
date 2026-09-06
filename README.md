@@ -11,9 +11,9 @@ git clone https://github.com/seonkim1003/ER-Triage.git
 cd ER-Triage
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.\.venv\Scripts\python.exe -m ertriage download
-.\.venv\Scripts\python.exe -m ertriage train --out artifacts/default-random-42
-.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/default-random-42
+.\.venv\Scripts\python.exe -m ertriage download --limit 0
+.\.venv\Scripts\python.exe -m ertriage train --limit 0 --out artifacts/full-random-42
+.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/full-random-42
 ```
 
 On macOS/Linux, create the environment with `python3.12 -m venv .venv` and use `.venv/bin/python` for the remaining Python commands. The dataset, environment and generated models are excluded from Git and recreated on each computer. The committed RESULTS.md records the initial experiment; its local model artifacts are not included.
@@ -26,9 +26,9 @@ An isolated Python 3.12 environment is available in `.venv`. Activation is optio
 
 ```powershell
 .\.venv\Scripts\python.exe -m ertriage download
-.\.venv\Scripts\python.exe -m ertriage train --limit 2000 --out artifacts/default-random-42
-.\.venv\Scripts\python.exe -m ertriage train --limit 2000 --split site --out artifacts/default-site-42
-.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/default-random-42
+.\.venv\Scripts\python.exe -m ertriage train --limit 0 --out artifacts/full-random-42
+.\.venv\Scripts\python.exe -m ertriage train --limit 0 --split site --out artifacts/full-site-42
+.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/full-random-42
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
@@ -36,13 +36,15 @@ An isolated Python 3.12 environment is available in `.venv`. Activation is optio
 
 `--threshold` picks the validation rule that fixes the operating point and `--select` picks the model. The defaults are `--threshold budget --alert-budget 2.0 --select stable`; `--threshold f1 --select ap` reproduces the configuration used before those rules existed, bit for bit. **The 2.0 alert-hour budget is an arbitrary placeholder, not a clinical capacity** — set `--alert-budget` to a review capacity someone has actually stated before reading anything into the alert load.
 
-A single run is not a stable estimate. Repeat with several seeds and compare the runs, each in its own output folder:
+`--limit 0` uses all 40,336 patients and is what RESULTS.md now reports; `--limit N` takes a seeded subsample of N. **Subsampled runs are not a cheap preview of the full-cohort answer.** At 2,000 patients the reported model, the subgroup findings and the calibration findings all differed from the full cohort, and in three of four cases the full-cohort point estimate fell outside the subsample's bootstrap interval. Use a subsample to exercise the pipeline, not to draw conclusions.
+
+To vary the split assignment, repeat with several seeds, each in its own output folder:
 
 ```powershell
-foreach ($s in 42,1,7,13,2024) { .\.venv\Scripts\python.exe -m ertriage train --limit 2000 --seed $s --out artifacts/default-random-$s }
+foreach ($s in 42,1,7,13,2024) { .\.venv\Scripts\python.exe -m ertriage train --limit 0 --seed $s --out artifacts/full-random-$s }
 ```
 
-The seed selects the patient subset and the split together, so seeds vary cohort and split at once. RESULTS.md reports ten such runs; the spread across them is wider than any one run's bootstrap interval.
+Below `--limit 0` the seed selects the patient subset as well, so subsampled seeds vary cohort and split at once.
 
 The default replay is the first test patient in sorted manifest order, selected without consulting outcomes. Pick a specific test patient using `--patient site_A/p000001.psv` (use an actual identifier from `test_patients.csv`). Replay prints hourly scores and illustrative review events, and saves CSV output locally.
 
@@ -50,19 +52,19 @@ After the first run, `powershell -ExecutionPolicy Bypass -File .\replay-demo.ps1
 
 For a new machine, use Python 3.12: `python -m venv .venv`, then `.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt`. The lock file records all installed dependencies. Linux/macOS commands use `.venv/bin/python`.
 
-For the full dataset, first run `.\.venv\Scripts\python.exe -m ertriage download --limit 0`, then `.\.venv\Scripts\python.exe -m ertriage train --limit 0 --out artifacts/full`. This requires substantially more RAM and time: features are held in memory. CPU threads are capped at two. Use a new output folder for each experiment; existing runs are never overwritten by training. Download and package installation require internet; training, evaluation, and replay run offline.
+The full dataset is 40,336 records and about 332 MB on disk. Downloading it takes roughly half an hour on a home connection; training then takes about nine minutes for the random split and fourteen for the site-held-out split, and peaks near 4 GB of RAM because features are held in memory. CPU threads are capped at two. Use a new output folder for each experiment; existing runs are never overwritten by training. Download and package installation require internet; training, evaluation, and replay run offline.
 
 ## Data and provenance
 
-- Source: [PhysioNet Challenge 2019 v1.0.0](https://physionet.org/content/challenge-2019/1.0.0/), public training sets A and B, 40,336 patient records in total.
+- Source: [PhysioNet Challenge 2019 v1.0.0](https://physionet.org/content/challenge-2019/1.0.0/), public training sets A and B, 40,336 patient records in total: 20,336 in set A and 20,000 in set B. All of them are downloaded and used by the reported runs.
 - Hourly pipe-delimited records with 40 predictors and `SepsisLabel`. The target is used **as provided**, already shifted six hours before sepsis onset. It remains positive afterwards; it is not an isolated future-event label and scores are not calibrated ER probabilities.
-- The downloader reads both official file listings and uniformly selects 2,000 records with seed 42 by default. It downloads individual files because the old ZIP endpoints return 404. Each record is schema-checked before an atomic local rename. Downloads resume by validating existing files; there are six concurrent downloads and bounded retries. Source URLs and locally computed SHA-256 hashes are saved in `data/physionet2019/provenance.json`. These hashes record local provenance, not independent publisher authentication.
+- The downloader reads both official file listings and fetches every record; `--limit N` uniformly selects N of them with the given seed. It downloads individual files because the old ZIP endpoints return 404. Each record is schema-checked before an atomic local rename. Downloads resume by validating existing files; there are six concurrent downloads and bounded retries. Source URLs and locally computed SHA-256 hashes are saved in `data/physionet2019/provenance.json`. These hashes record local provenance, not independent publisher authentication.
 - Dataset license: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Cite Reyna et al., *Early Prediction of Sepsis from Clinical Data: The PhysioNet/Computing in Cardiology Challenge 2019*, PhysioNet (2019), [doi:10.13026/v64v-d857](https://doi.org/10.13026/v64v-d857), and the [associated paper](https://doi.org/10.1097/CCM.0000000000004145).
 - Downloaded patient records and model artifacts are excluded from version control. No reidentification, uploads, or live patient inputs are implemented.
 
 ## Method
 
-The default experiment uniformly samples 2,000 patient files before looking at labels, using seed 42. Patients are split 60/20/20 into train, validation and test, stratified by whether any row has a positive label. Source-prefixed patient identifiers prevent filename collisions; duplicate selected file contents are rejected. This is patient separation at the dataset's record level, not independent verification of underlying identities.
+The reported experiment uses all 40,336 patient files; `--limit N` instead samples N of them uniformly before looking at labels, using the given seed. Patients are split 60/20/20 into train, validation and test, stratified by whether any row has a positive label. Source-prefixed patient identifiers prevent filename collisions; duplicate selected file contents are rejected. This is patient separation at the dataset's record level, not independent verification of underlying identities.
 
 Features include the 40 current/forward-filled values, current missingness flags, three-hour changes in seven vital signs, and time since each of those vitals was last observed. No backward filling, future aggregates, or labels enter feature construction. Leading missing values remain missing. Logistic-regression medians and scaling are fitted on training patients only. The tree model handles NaNs directly; its internal random-row early stopping is disabled.
 
@@ -86,7 +88,7 @@ Artifacts include exact patient manifests and file hashes, serialized models, ho
 - **Subgroup description.** `subgroup_metrics` reports held-out discrimination, utility, recall and alert load for patient groups assigned from recorded administrative fields before scoring. It fits and selects nothing, reports no intervals, and applies no multiplicity control. Levels can be small and prevalence differs between them, so these are exploratory descriptions of one cohort, not subgroup validation and not evidence about fairness in care.
 - **Site-held-out evaluation.** `--split site` holds out an entire source set, so the evaluated patients come from a source the models never saw. This is still ICU data and still retrospective; it is a different-source check, not external hospital or ER validation.
 
-RESULTS.md records fifty runs. Held-out recalibration narrows the calibration gap within one source but not across sites; subgroup description exposes levels where the selected model alerts on no positive hour at all, and one unseen-site subgroup where it ranks below chance; the seed sweep shows that the previous selection and threshold rules were near arbitrary, which is why both were replaced. Prospective validation and any clinical assessment remain unimplemented.
+RESULTS.md reports the full-cohort runs and records what training on all 40,336 patients retracted. The subgroup disparities and the severe miscalibration reported from the 2,000-patient subsample were small-sample artifacts and do not survive; the apparent tie between the two learned baselines was a power problem, not equivalence. Cross-site degradation survived every cohort size and configuration: held-out AUROC falls from 0.827 within source to 0.765 on an unseen source, on non-overlapping intervals, and scores carried across sites remain systematically too high. Prospective validation and any clinical assessment remain unimplemented.
 
 ## Historical replay
 
@@ -103,4 +105,4 @@ Replay also prints a `calibrated_score` column when the run recorded a recalibra
 - `tests/test_pipeline.py`: leakage, split, utility, calibration, recalibration, subgroup, threshold-rule, selection, bootstrap, validation and policy regression tests.
 - `artifacts/`: local run outputs; `data/`: local records and download provenance.
 
-Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Remaining work: a review capacity stated by someone qualified to state one, cross-site recalibration that actually transfers, full-cohort runs, subgroup work with adequate power and stated comparisons, clinician-designed policies, and genuinely ER-specific retrospective validation.
+Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Remaining work: a review capacity stated by someone qualified to state one, cross-site recalibration that actually transfers, subgroup comparisons stated in advance with intervals and multiplicity control, a target that is an isolated future event rather than the provided persistent label, clinician-designed policies, and genuinely ER-specific retrospective validation.
