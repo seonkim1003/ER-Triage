@@ -20,6 +20,13 @@ def main():
     t.add_argument("--split", choices=["random", "site"], default="random",
                    help="random patient split, or hold out an entire source site")
     t.add_argument("--draws", type=int, default=1000, help="Patient bootstrap resamples for held-out intervals")
+    t.add_argument("--threshold", choices=["f1", "utility", "budget"], default="budget",
+                   help="Validation threshold rule: an alert budget (default), hourly F1, or official utility")
+    t.add_argument("--alert-budget", type=float, default=2.,
+                   help="Alert hours per 100 allowed by the budget threshold rule")
+    t.add_argument("--select", choices=["ap", "stable"], default="stable",
+                   help="Model selection: validation average precision, or step back to the simplest"
+                        " model a paired validation bootstrap cannot distinguish from the leader")
     r = sub.add_parser("replay")
     r.add_argument("--data", default="data/physionet2019")
     r.add_argument("--run", default="artifacts/baseline")
@@ -35,7 +42,10 @@ def main():
                 parser.error("--limit must be nonnegative")
             if args.draws < 1:
                 parser.error("--draws must be positive")
-            train(args.data, args.out, args.limit, args.seed, args.split, args.draws)
+            if not 0 < args.alert_budget <= 100:
+                parser.error("--alert-budget must be within (0, 100] alert hours per 100")
+            train(args.data, args.out, args.limit, args.seed, args.split, args.draws,
+                  args.threshold, args.alert_budget, args.select)
         else:
             replay(args.data, args.run, args.patient)
     except (ValueError, FileNotFoundError) as exc:

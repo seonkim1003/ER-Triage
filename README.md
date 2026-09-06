@@ -12,8 +12,8 @@ cd ER-Triage
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
 .\.venv\Scripts\python.exe -m ertriage download
-.\.venv\Scripts\python.exe -m ertriage train --out artifacts/random-seed-42
-.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/random-seed-42
+.\.venv\Scripts\python.exe -m ertriage train --out artifacts/default-random-42
+.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/default-random-42
 ```
 
 On macOS/Linux, create the environment with `python3.12 -m venv .venv` and use `.venv/bin/python` for the remaining Python commands. The dataset, environment and generated models are excluded from Git and recreated on each computer. The committed RESULTS.md records the initial experiment; its local model artifacts are not included.
@@ -26,18 +26,20 @@ An isolated Python 3.12 environment is available in `.venv`. Activation is optio
 
 ```powershell
 .\.venv\Scripts\python.exe -m ertriage download
-.\.venv\Scripts\python.exe -m ertriage train --limit 2000 --out artifacts/random-seed-42
-.\.venv\Scripts\python.exe -m ertriage train --limit 2000 --split site --out artifacts/site-seed-42
-.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/random-seed-42
+.\.venv\Scripts\python.exe -m ertriage train --limit 2000 --out artifacts/default-random-42
+.\.venv\Scripts\python.exe -m ertriage train --limit 2000 --split site --out artifacts/default-site-42
+.\.venv\Scripts\python.exe -m ertriage replay --run artifacts/default-random-42
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
 `--split site` holds out every patient from one source set instead of random patients, so training never sees the evaluated site. `--draws` sets the number of patient bootstrap resamples used for held-out intervals (default 1000); lower it for a faster run.
 
+`--threshold` picks the validation rule that fixes the operating point and `--select` picks the model. The defaults are `--threshold budget --alert-budget 2.0 --select stable`; `--threshold f1 --select ap` reproduces the configuration used before those rules existed, bit for bit. **The 2.0 alert-hour budget is an arbitrary placeholder, not a clinical capacity** — set `--alert-budget` to a review capacity someone has actually stated before reading anything into the alert load.
+
 A single run is not a stable estimate. Repeat with several seeds and compare the runs, each in its own output folder:
 
 ```powershell
-foreach ($s in 42,1,7,13,2024) { .\.venv\Scripts\python.exe -m ertriage train --limit 2000 --seed $s --out artifacts/random-seed-$s }
+foreach ($s in 42,1,7,13,2024) { .\.venv\Scripts\python.exe -m ertriage train --limit 2000 --seed $s --out artifacts/default-random-$s }
 ```
 
 The seed selects the patient subset and the split together, so seeds vary cohort and split at once. RESULTS.md reports ten such runs; the spread across them is wider than any one run's bootstrap interval.
@@ -64,7 +66,11 @@ The default experiment uniformly samples 2,000 patient files before looking at l
 
 Features include the 40 current/forward-filled values, current missingness flags, three-hour changes in seven vital signs, and time since each of those vitals was last observed. No backward filling, future aggregates, or labels enter feature construction. Leading missing values remain missing. Logistic-regression medians and scaling are fitted on training patients only. The tree model handles NaNs directly; its internal random-row early stopping is disabled.
 
-Baselines are a prevalence-only predictor, unweighted logistic regression, and histogram gradient boosting. Each threshold maximizes hourly F1 on validation patients; the selected model maximizes validation average precision. These choices are frozen before evaluating test patients. No test tuning or clinical interpretation of the threshold is justified.
+Baselines are a prevalence-only predictor, unweighted logistic regression, and histogram gradient boosting. Both remaining choices are made on validation patients and frozen before any test hour is scored. No test tuning or clinical interpretation of the threshold is justified.
+
+The **threshold rule** sets the operating point. `budget` (default) takes the lowest threshold whose validation alert load stays within `--alert-budget` alert hours per 100, making the operating point a stated capacity rather than the argmax of a noisy curve. `f1` maximizes hourly F1 and `utility` maximizes the official patient-weighted utility; RESULTS.md shows the first swings alert load tenfold across seeds and the second buys score by alerting on up to 29% of all hours.
+
+The **selection rule** decides which baseline is reported. `stable` (default) takes the validation average-precision leader, then runs a paired patient bootstrap on validation predictions; when the interval for the average-precision difference includes zero, the leader is not distinguishable from the simpler model and the simpler model is reported, in the prespecified order logistic before boosting. Prevalence stays a reference baseline and is never selected. `ap` reports the bare leader. Across ten runs no validation margin excluded zero, so this is a tie-breaking convention for reproducibility, not evidence that the simpler model generalizes better.
 
 Artifacts include exact patient manifests and file hashes, serialized models, hourly held-out predictions for the selected model, and `metrics.json` with AUROC, average precision, Brier score, confusion counts, precision/recall, alert hours per 100 hours, and the fraction of nonsepsis patients receiving any alert. Manifests also carry each patient's source site and recorded age band, gender code and ICU-unit indicator, which are read from the first hour and used only to describe held-out subgroups. Hourly metrics weight long stays more heavily.
 
@@ -75,11 +81,12 @@ Artifacts include exact patient manifests and file hashes, serialized models, ho
 - **Utility score.** `normalized_utility` implements the official PhysioNet/CinC 2019 scoring: alerting is rewarded on a ramp from twelve to six hours before onset, penalized on a ramp from six hours before to three hours after, staying silent inside that late window is penalized, and each false alert hour costs 0.05. The score is normalized so 1.0 is the best attainable alert timing and 0.0 is never alerting. Because it reuses the provided already-shifted label, it inherits that label's definition and is not an independent outcome.
 - **Uncertainty.** `bootstrap` resamples whole test patients with replacement, seeded and reproducible, and reports 95% percentile intervals for AUROC, average precision, utility, precision, recall and alert rate. These intervals describe sampling variation within one cohort. They are not evidence of generalization to another hospital, to an ER, or to future care.
 - **Calibration.** `calibration` reports ten equal-count reliability bins, expected calibration error, and the intercept and slope of a logit recalibration fit. A calibrated score would give intercept 0 and slope 1; the observed slopes are well below 1. Model outputs are not calibrated probabilities and must not be read as risk of sepsis.
+- **Selection margins.** `paired_difference` gives a percentile interval for the average-precision difference between two frozen score vectors, resampling the same validation patients under both. It answers whether a selection margin survives resampling; it is not a hypothesis test and says nothing about which model generalizes.
 - **Recalibration.** `recalibrator` fits a Platt map on validation predictions only; `recalibrate` applies the frozen map to held-out scores and to the threshold. The map is strictly monotone, so it changes reported probabilities, Brier score and reliability but never the ranking, the discrimination metrics, or which hours alert. Each run records `alerts_identical` as a check. Recalibrated output is still an ICU development score, not a probability of sepsis for an ER patient.
 - **Subgroup description.** `subgroup_metrics` reports held-out discrimination, utility, recall and alert load for patient groups assigned from recorded administrative fields before scoring. It fits and selects nothing, reports no intervals, and applies no multiplicity control. Levels can be small and prevalence differs between them, so these are exploratory descriptions of one cohort, not subgroup validation and not evidence about fairness in care.
 - **Site-held-out evaluation.** `--split site` holds out an entire source set, so the evaluated patients come from a source the models never saw. This is still ICU data and still retrospective; it is a different-source check, not external hospital or ER validation.
 
-RESULTS.md records ten runs. Held-out recalibration narrows the calibration gap within one source but not across sites, subgroup description exposes levels where the selected model alerts on no positive hour at all, and the seed sweep shows that model selection and alert load are unstable across cohorts. Prospective validation and any clinical assessment remain unimplemented.
+RESULTS.md records fifty runs. Held-out recalibration narrows the calibration gap within one source but not across sites; subgroup description exposes levels where the selected model alerts on no positive hour at all, and one unseen-site subgroup where it ranks below chance; the seed sweep shows that the previous selection and threshold rules were near arbitrary, which is why both were replaced. Prospective validation and any clinical assessment remain unimplemented.
 
 ## Historical replay
 
@@ -90,10 +97,10 @@ Replay also prints a `calibrated_score` column when the run recorded a recalibra
 ## Layout
 
 - `ertriage/data.py`: download, schema checks and causal features.
-- `ertriage/model.py`: patient splits, baselines, threshold selection and evaluation.
-- `ertriage/evaluate.py`: official utility scoring, calibration, validation-fitted recalibration, subgroup description and patient bootstrap.
+- `ertriage/model.py`: patient splits, baselines, threshold rules, model selection and evaluation.
+- `ertriage/evaluate.py`: official utility scoring, calibration, validation-fitted recalibration, subgroup description, selection margins and patient bootstrap.
 - `ertriage/replay.py`: prefix-only replay and illustrative cadence.
-- `tests/test_pipeline.py`: leakage, split, utility, calibration, recalibration, subgroup, bootstrap, validation and policy regression tests.
+- `tests/test_pipeline.py`: leakage, split, utility, calibration, recalibration, subgroup, threshold-rule, selection, bootstrap, validation and policy regression tests.
 - `artifacts/`: local run outputs; `data/`: local records and download provenance.
 
-Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Remaining work: a stable model-selection and threshold rule, cross-site recalibration that actually transfers, full-cohort runs, subgroup work with adequate power and stated comparisons, clinician-designed policies, and genuinely ER-specific retrospective validation.
+Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Remaining work: a review capacity stated by someone qualified to state one, cross-site recalibration that actually transfers, full-cohort runs, subgroup work with adequate power and stated comparisons, clinician-designed policies, and genuinely ER-specific retrospective validation.

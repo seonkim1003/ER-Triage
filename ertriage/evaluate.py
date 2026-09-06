@@ -53,6 +53,26 @@ def utility_by_patient(y, alerts, groups):
     return observed, best, inaction
 
 
+def utility_hours(y, groups):
+    """Per-hour alert and silence utility plus the best attainable alert mask, across the cohort.
+
+    Utility is additive over hours, so laying these out once makes the score of
+    any alert mask a single vectorized sum. Used to search thresholds on
+    validation without refitting or rescoring anything.
+    """
+    alert, silent = np.zeros(len(y)), np.zeros(len(y))
+    best = np.zeros(len(y), dtype=bool)
+    for part in groups:
+        alert[part], silent[part], best[part] = utility_terms(y[part])
+    return alert, silent, best
+
+
+def utility_of(mask, alert, silent, best):
+    """Normalized utility of one alert mask against precomputed per-hour terms."""
+    span = np.where(best, alert, silent).sum() - silent.sum()
+    return float((np.where(mask, alert, silent).sum() - silent.sum()) / span) if span > 0 else None
+
+
 def normalized_utility(observed, best, inaction):
     """Official normalization; undefined when no selected patient can earn utility."""
     span = best.sum() - inaction.sum()
@@ -135,6 +155,33 @@ def calibration(y, p, bins=10):
     intercept, slope = logit_fit(y, p)
     # A perfectly calibrated score has intercept 0 and slope 1; slope < 1 means overextended scores.
     return dict(expected_calibration_error=error, intercept=intercept, slope=slope, bins=table)
+
+
+def paired_difference(y, first, second, ids, seed=42, draws=1000, level=.95):
+    """Interval for the average-precision difference between two frozen score vectors.
+
+    The same resampled patients are scored under both, so the comparison is
+    paired. Run on validation predictions to ask whether a selection margin is
+    distinguishable from resampling noise; it is not a hypothesis test and it
+    says nothing about which model would generalize.
+    """
+    y = np.asarray(y)
+    first, second = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
+    rows = [np.arange(part.start, part.stop) for part in patient_groups(ids)]
+    rng = np.random.default_rng(seed)
+    differences = []
+    for _ in range(draws):
+        index = np.concatenate([rows[i] for i in rng.integers(0, len(rows), len(rows))])
+        if len(np.unique(y[index])) == 2:
+            differences.append(average_precision_score(y[index], first[index])
+                               - average_precision_score(y[index], second[index]))
+    if len(differences) < draws // 2:
+        return None
+    half = (1 - level) / 2
+    return dict(draws=len(differences), level=level, seed=seed,
+                observed=float(average_precision_score(y, first) - average_precision_score(y, second)),
+                low=float(np.percentile(differences, 100 * half)),
+                high=float(np.percentile(differences, 100 * (1 - half))))
 
 
 def bootstrap(y, p, threshold, ids, seed=42, draws=1000, level=.95):

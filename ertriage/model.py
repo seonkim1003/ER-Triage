@@ -19,8 +19,9 @@ from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
 from .data import read_patient, features, patient_attributes
-from .evaluate import (bootstrap, calibration, normalized_utility, patient_groups, recalibrate,
-                       recalibrator, subgroup_metrics, utility_by_patient)
+from .evaluate import (bootstrap, calibration, normalized_utility, paired_difference, patient_groups,
+                       recalibrate, recalibrator, subgroup_metrics, utility_by_patient, utility_hours,
+                       utility_of)
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "2")
 
@@ -42,10 +43,63 @@ def split_patients(manifest, seed, scheme="random"):
     return {"train": train, "validation": val, "test": test}
 
 
-def threshold_for(y, p):
-    precision, recall, thresholds = precision_recall_curve(y, p)
-    f1 = 2 * precision[:-1] * recall[:-1] / np.maximum(precision[:-1] + recall[:-1], 1e-12)
-    return float(thresholds[np.argmax(f1)])
+SELECTION_ORDER = ("logistic", "boosting")  # simplest first; prevalence stays a reference baseline
+
+
+def threshold_for(y, p, ids=None, rule="f1", budget=2., grid=201):
+    """Validation-only threshold rules, all frozen before any test hour is scored.
+
+    "f1" maximizes hourly F1 and weights long stays most; it chases a noisy
+    precision-recall curve when barely one hour in seventy is positive. "utility"
+    maximizes the official patient-weighted normalized utility, the score this
+    project actually reports. "budget" takes the lowest threshold whose
+    validation alert load stays within `budget` alert hours per 100, fixing the
+    operating point by review capacity rather than by a curve maximum. None of
+    these is a clinically justified operating point.
+    """
+    y, p = np.asarray(y), np.asarray(p, dtype=float)
+    if rule == "f1":
+        precision, recall, thresholds = precision_recall_curve(y, p)
+        f1 = 2 * precision[:-1] * recall[:-1] / np.maximum(precision[:-1] + recall[:-1], 1e-12)
+        return float(thresholds[np.argmax(f1)])
+    candidates = np.unique(p)
+    if rule == "budget":
+        rate = (len(p) - np.searchsorted(np.sort(p), candidates, side="left")) / len(p)
+        allowed = np.flatnonzero(rate <= budget / 100)
+        return float(candidates[allowed[0]]) if len(allowed) else float(candidates[-1])
+    if rule != "utility":
+        raise ValueError(f"Unknown threshold rule: {rule}")
+    if ids is None:
+        raise ValueError("The utility threshold rule needs patient identifiers")
+    alert, silent, best = utility_hours(y, patient_groups(ids))
+    candidates = np.unique(np.quantile(candidates, np.linspace(0, 1, grid)))
+    scored = [(utility_of(p >= t, alert, silent, best), float(t)) for t in candidates]
+    scored = [pair for pair in scored if pair[0] is not None]
+    if not scored:
+        raise ValueError("No threshold earns defined utility on validation")
+    # Equal utility breaks towards the higher threshold, the quieter operating point.
+    return max(scored)[1]
+
+
+def select_model(scores, y, ids, order=SELECTION_ORDER, seed=42, draws=1000):
+    """Pick the average-precision leader, then step back to the simplest model it does not beat.
+
+    The seed sweep in RESULTS.md showed leaders separated by validation margins
+    as small as 0.0002, so the leader alone is close to arbitrary. A paired
+    patient bootstrap on validation predictions decides whether the margin is
+    distinguishable from resampling noise; when it is not, the earlier model in
+    the prespecified order is reported. This uses validation only and is a
+    tie-breaking convention, not evidence that the simpler model generalizes.
+    """
+    leader = max(order, key=lambda name: average_precision_score(y, scores[name]))
+    for name in order:
+        if name == leader:
+            return leader, dict(rule="stable", leader=leader, chosen=leader, stepped_back_to=None)
+        interval = paired_difference(y, scores[leader], scores[name], ids, seed=seed, draws=draws)
+        if interval and interval["low"] <= 0 <= interval["high"]:
+            return name, dict(rule="stable", leader=leader, chosen=name, stepped_back_to=name,
+                              average_precision_difference=interval)
+    return leader, dict(rule="stable", leader=leader, chosen=leader, stepped_back_to=None)
 
 
 def metrics(y, p, threshold, ids):
@@ -66,7 +120,8 @@ def metrics(y, p, threshold, ids):
                 calibration=calibration(y, p))
 
 
-def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
+def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
+          rule="budget", budget=2., selection="stable"):
     root, output = Path(root), Path(output)
     if output.exists():
         raise ValueError("Use a new output directory to preserve previous experiments")
@@ -108,7 +163,10 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
     }
     descriptors = ["site", "age_band", "gender", "unit"]
     levels = {name: splits["test"].set_index("patient")[name].to_dict() for name in descriptors}
-    report = dict(seed=seed, split=scheme, selected_patients=len(paths), available_patients=len(list(root.glob("site_*/*.psv"))))
+    report = dict(seed=seed, split=scheme, threshold_rule=rule, selection_rule=selection,
+                  selected_patients=len(paths), available_patients=len(list(root.glob("site_*/*.psv"))))
+    if rule == "budget":
+        report["alert_budget_per_100"] = budget
     report.update(python=platform.python_version(), sklearn=sklearn.__version__, models={},
                   scope="ICU retrospective development only; not ER validation",
                   subgroups_note="Descriptive splits of one held-out cohort by recorded administrative"
@@ -126,7 +184,7 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
             model.fit(x, y)
             vx, vy, vi = arrays["validation"]
             vp = model.predict_proba(vx)[:, 1]
-            threshold = threshold_for(vy, vp)
+            threshold = threshold_for(vy, vp, vi, rule=rule, budget=budget)
             report["models"][name] = {"validation": metrics(vy, vp, threshold, vi)}
             # Recalibration is fitted on validation predictions only and frozen before test hours.
             fit = recalibrator(vy, vp)
@@ -135,8 +193,15 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
             report["models"][name]["recalibration"] = fit
             joblib.dump(dict(model=model, threshold=threshold, feature_columns=list(x.columns),
                              recalibration=fit), output / f"{name}.joblib")
-        selected = max(models, key=lambda n: report["models"][n]["validation"]["average_precision"])
+        if selection == "stable":
+            vx, vy, vi = arrays["validation"]
+            scores = {name: model.predict_proba(vx)[:, 1] for name, model in models.items()}
+            selected, decision = select_model(scores, vy, vi, seed=seed, draws=draws)
+        else:
+            selected = max(models, key=lambda n: report["models"][n]["validation"]["average_precision"])
+            decision = dict(rule="ap", leader=selected, chosen=selected, stepped_back_to=None)
         report["selected_model"] = selected
+        report["selection"] = decision
         # Selection and thresholds are frozen before examining test outcomes.
         tx, ty, ti = arrays["test"]
         for name, model in models.items():

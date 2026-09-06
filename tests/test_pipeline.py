@@ -4,7 +4,7 @@ import pytest
 from pandas.testing import assert_frame_equal
 
 from ertriage.data import COLUMNS, features, patient_attributes, read_patient
-from ertriage.model import split_patients, threshold_for, metrics
+from ertriage.model import select_model, split_patients, threshold_for, metrics
 from ertriage.replay import policy
 
 
@@ -238,3 +238,51 @@ def test_patient_attributes_bracket_age_and_mark_unrecorded_fields():
     df["Age"], df["Unit1"], df["Unit2"] = 49.9, 0, 0
     assert patient_attributes(df)["age_band"] == "age_lt_50"
     assert patient_attributes(df)["unit"] == "unit_other"
+
+
+def test_threshold_rules_optimize_their_own_objective():
+    from ertriage.evaluate import patient_groups, utility_hours, utility_of
+
+    y = np.concatenate([septic() if i % 2 else np.zeros(24, dtype=int) for i in range(20)])
+    ids = np.repeat([f"p{i}" for i in range(20)], 24)
+    rng = np.random.default_rng(4)
+    p = np.clip(.05 + .35 * y + rng.normal(0, .08, len(y)), 1e-6, 1 - 1e-6)
+
+    budgeted = threshold_for(y, p, ids, rule="budget", budget=2.)
+    assert (p >= budgeted).mean() <= .02
+    below = np.unique(p)[np.searchsorted(np.unique(p), budgeted) - 1]
+    assert (p >= below).mean() > .02  # no lower observed score stays inside the budget
+    assert threshold_for(y, p, ids, rule="budget", budget=100.) == p.min()
+
+    alert, silent, best = utility_hours(y, patient_groups(ids))
+    chosen = threshold_for(y, p, ids, rule="utility")
+    achieved = utility_of(p >= chosen, alert, silent, best)
+    grid = np.unique(np.quantile(np.unique(p), np.linspace(0, 1, 201)))
+    assert achieved >= max(utility_of(p >= t, alert, silent, best) for t in grid) - 1e-12
+    assert achieved > utility_of(p >= threshold_for(y, p, ids, rule="budget", budget=.5),
+                                 alert, silent, best)
+    with pytest.raises(ValueError, match="threshold rule"):
+        threshold_for(y, p, ids, rule="youden")
+    with pytest.raises(ValueError, match="identifiers"):
+        threshold_for(y, p, rule="utility")
+
+
+def test_stable_selection_steps_back_only_on_indistinguishable_margins():
+    y = np.concatenate([septic() if i % 2 else np.zeros(24, dtype=int) for i in range(40)])
+    ids = np.repeat([f"p{i}" for i in range(40)], 24)
+    rng = np.random.default_rng(6)
+    logistic = np.clip(.05 + .06 * y + rng.normal(0, .05, len(y)), 0, 1)
+    # Boosting leads only because of one patient, so resampled cohorts disagree about the winner.
+    boosting = logistic.copy()
+    one = (ids == "p1") & (y == 1)
+    boosting[one] = np.clip(boosting[one] + .05, 0, 1)
+    chosen, decision = select_model({"logistic": logistic, "boosting": boosting}, y, ids, seed=42, draws=200)
+    assert decision["leader"] == "boosting" and chosen == "logistic"
+    assert decision["stepped_back_to"] == "logistic"
+    margin = decision["average_precision_difference"]
+    assert margin["observed"] > 0 and margin["low"] <= 0 <= margin["high"]
+
+    separated = {"logistic": np.clip(.05 + rng.normal(0, .05, len(y)), 0, 1),
+                 "boosting": np.clip(.05 + .3 * y + rng.normal(0, .05, len(y)), 0, 1)}
+    clear, decision = select_model(separated, y, ids, seed=42, draws=200)
+    assert clear == "boosting" and decision["stepped_back_to"] is None
