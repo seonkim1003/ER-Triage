@@ -58,15 +58,21 @@ def threshold_for(y, p, ids=None, rule="f1", budget=2., grid=201):
     these is a clinically justified operating point.
     """
     y, p = np.asarray(y), np.asarray(p, dtype=float)
+    if p.ndim != 1 or not len(p) or len(y) != len(p) or not np.isfinite(p).all() or ((p < 0) | (p > 1)).any():
+        raise ValueError("Threshold selection needs aligned nonempty labels and finite scores in [0, 1]")
     if rule == "f1":
         precision, recall, thresholds = precision_recall_curve(y, p)
         f1 = 2 * precision[:-1] * recall[:-1] / np.maximum(precision[:-1] + recall[:-1], 1e-12)
         return float(thresholds[np.argmax(f1)])
     candidates = np.unique(p)
     if rule == "budget":
+        if not np.isfinite(budget) or not 0 < budget <= 100:
+            raise ValueError("Alert budget must be within (0, 100]")
         rate = (len(p) - np.searchsorted(np.sort(p), candidates, side="left")) / len(p)
         allowed = np.flatnonzero(rate <= budget / 100)
-        return float(candidates[allowed[0]]) if len(allowed) else float(candidates[-1])
+        # No observed threshold can satisfy a budget smaller than the top tie.
+        # A finite sentinel above the score domain represents the no-alert rule.
+        return float(candidates[allowed[0]]) if len(allowed) else float(np.nextafter(1., np.inf))
     if rule != "utility":
         raise ValueError(f"Unknown threshold rule: {rule}")
     if ids is None:
@@ -215,7 +221,9 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
             report["models"][name]["test"]["subgroups"] = {
                 name_: subgroup_metrics(ty, p, threshold, ti, level) for name_, level in levels.items()}
             fit = report["models"][name]["recalibration"]
-            columns = dict(patient=ti, label=ty, score=p)
+            columns = dict(patient=ti, hour=np.concatenate([frames[pid].ICULOS.to_numpy()
+                                                          for pid in splits["test"].patient]),
+                           label=ty, score=p)
             if fit:
                 calibrated = recalibrate(fit, p)
                 columns["calibrated_score"] = calibrated

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ER-Triage · Research replay</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header class="top"><a href="/" class="brand"><span class="brand-mark">↗</span> ER-Triage <span class="tag">RESEARCH</span></a><span class="local">Local historical viewer</span></header>
+<div class="scope">PhysioNet 2019 ICU records · Illustrative review policy · Not for patient care or ER validation</div>
+<div class="layout">
+<aside>
+  <p class="eyebrow">HELD-OUT COHORT</p><h2 id="run-name">Loading run…</h2><p id="run-detail" class="muted"></p>
+  <form id="patient-form"><label for="patient-search">Find a patient record</label><div class="search"><input id="patient-search" placeholder="e.g. site_A/p000002.psv" list="patient-options" autocomplete="off" required><button type="submit">Open</button></div><datalist id="patient-options"></datalist><small id="search-count">Records are ordered by identifier, without outcome filtering.</small></form>
+  <div class="record-nav"><button id="previous" disabled>← Previous</button><button id="next" disabled>Next →</button></div>
+  <section class="review-panel"><p class="eyebrow">CURRENT REVIEW PLAN</p><h3 id="review-status">Waiting for history</h3><p id="review-reason" class="muted">Select a recorded patient to begin.</p><p id="next-review"></p><small>Review events respond to scores and observation age. They are separate from threshold alerts.</small></section>
+  <section class="cohort"><p class="eyebrow">EARLY-WARNING EVALUATION</p><div id="evaluation">No evaluation loaded.</div><details><summary>How timing is measured</summary><p>The onset proxy is the first observed 0-to-1 label transition plus 6 hours. The main warning window is 12 to 6 hours before that proxy. Records need a full window and the proxy inside the stay.</p><p>Positive-at-start, incomplete and nonpersistent records are counted separately. This is a retrospective analysis convention.</p><a href="https://physionet.org/content/challenge-2019/1.0.0/" target="_blank" rel="noreferrer">PhysioNet label definition ↗</a></details></section>
+</aside>
+<main>
+  <div class="title-row"><div><p class="eyebrow">PATIENT HISTORY / REPLAY</p><h1 id="patient-title">Explore the recorded timeline</h1></div><span class="mode" id="mode-label">History prefix</span></div>
+  <p id="notice" role="status" aria-live="polite">Loading verified held-out predictions…</p>
+  <div id="workspace" hidden>
+    <div class="transport"><button id="play" class="primary">▶ Play</button><button id="step" aria-label="Advance one recorded hour">Step +1h</button><button id="restart">Restart</button><label class="speed">Speed <select id="speed"><option value="1200">1×</option><option value="600">2×</option><option value="300">4×</option></select></label><strong id="clock"></strong></div>
+    <label class="scrub-label" for="scrubber">Recorded hour <span id="position"></span></label><input id="scrubber" type="range" min="0" value="0" step="1">
+    <div class="retrospective"><label><input type="checkbox" id="retrospective"> Reveal full history and retrospective labels</label><span id="outcome-note">Future scores, observations and outcomes are hidden.</span></div>
+    <section class="chart-section"><div class="section-heading"><h2>Model score</h2><p><span class="legend indigo">━</span> Frozen score <span class="legend amber">┄</span> Alert threshold</p></div><div id="score-chart" class="chart"></div><p class="chart-foot"><span id="score-value"></span><span>Development score, not a clinical risk probability.</span></p></section>
+    <section class="events-section"><div class="section-heading"><h2>Alerts & reviews</h2><p>Threshold alerts ▲ &nbsp; Scheduled reviews ●</p></div><div id="events-chart" class="chart"></div><p id="event-count" class="muted"></p><p id="timing-summary" class="muted" hidden></p></section>
+    <section class="chart-section"><div class="section-heading"><h2>Recorded vital signs</h2><label class="vital-choice">Signal <select id="vital"><option value="HR">Heart rate · bpm</option><option value="O2Sat">Oxygen saturation · %</option><option value="Temp">Temperature · °C</option><option value="SBP">Systolic BP · mmHg</option><option value="MAP">Mean arterial pressure · mmHg</option><option value="DBP">Diastolic BP · mmHg</option><option value="Resp">Respiratory rate · /min</option></select></label></div><div id="vital-chart" class="chart"></div><p class="chart-foot"><span id="vital-value"></span><span>Dots are recorded measurements. Gaps remain unfilled.</span></p></section>
+    <details class="hourly"><summary>Inspect hourly values</summary><div class="table-wrap"><table><thead><tr><th>ICU hour</th><th>Score</th><th>Alert</th><th>Review</th><th id="vital-heading">HR (bpm)</th><th>Observation age</th><th>Reason</th><th id="label-heading" hidden>Retrospective label</th></tr></thead><tbody id="hourly-body"></tbody></table></div></details>
+    <footer id="integrity">Patient file hash and prediction alignment verified. Legacy predictions assume original within-patient row order.</footer>
+  </div>
+</main></div>
+</body></html>

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 from threadpoolctl import threadpool_limits
 
@@ -22,6 +23,23 @@ def policy(score, previous, threshold, stale):
     return 4, "lower score"
 
 
+def review_schedule(scores, stale, threshold):
+    """Shared causal scheduler for one patient's replay and workload audit."""
+    scores, stale = np.asarray(scores, dtype=float), np.asarray(stale, dtype=bool)
+    if scores.ndim != 1 or stale.shape != scores.shape or not len(scores):
+        raise ValueError("Schedule needs nonempty aligned scores and observation flags")
+    if not np.isfinite(scores).all() or ((scores < 0) | (scores > 1)).any() or not np.isfinite(threshold):
+        raise ValueError("Schedule needs finite scores in [0, 1] and a finite threshold")
+    rows, previous, due = [], None, 1
+    for hour, (score, missing) in enumerate(zip(scores, stale), start=1):
+        interval, reason = policy(score, previous, threshold, missing)
+        review = hour >= due or interval == 1
+        due = hour + interval if review else min(due, hour + interval)
+        rows.append(dict(review_now=bool(review), next_review_in_hours=due-hour, reason=reason))
+        previous = score
+    return pd.DataFrame(rows)
+
+
 def replay(root, run, patient=None):
     root, run = Path(root), Path(run)
     report = json.loads((run / "metrics.json").read_text())
@@ -32,29 +50,24 @@ def replay(root, run, patient=None):
     # Only load model files generated locally by this project; pickle is executable.
     bundle = joblib.load(run / f"{report['selected_model']}.joblib")
     df = read_patient(root / patient)
-    rows, previous, due = [], None, 1
+    rows, stale_flags = [], []
     with threadpool_limits(limits=2):
         for i in range(len(df)):
             prefix = df.iloc[:i + 1]
             x = features(prefix).iloc[[-1]][bundle["feature_columns"]]
             score = float(bundle["model"].predict_proba(x)[0, 1])
             stale = bool((x[[v + "_age" for v in VITALS]] >= 4).any(axis=None))
-            interval, reason = policy(score, previous, bundle["threshold"], stale)
-            hour = i + 1
-            review = hour >= due or interval == 1
-            if review:
-                due = hour + interval
-            else:
-                due = min(due, hour + interval)
+            stale_flags.append(stale)
             row = dict(hour=int(df.ICULOS.iloc[i]), score=score)
             # The frozen map is monotone, so the cadence below is unchanged by recalibration.
             if bundle.get("recalibration"):
                 row["calibrated_score"] = float(recalibrate(bundle["recalibration"], score))
-            row.update(review_now=review, next_review_in_hours=due-hour, reason=reason,
-                       retrospective_label=int(df.SepsisLabel.iloc[i]))
+            row.update(retrospective_label=int(df.SepsisLabel.iloc[i]))
             rows.append(row)
-            previous = score
     result = pd.DataFrame(rows)
+    schedule = review_schedule(result.score, stale_flags, bundle["threshold"])
+    result = pd.concat([result.drop(columns="retrospective_label"), schedule,
+                        result[["retrospective_label"]]], axis=1)
     dest = run / f"replay_{Path(patient).stem}.csv"
     result.to_csv(dest, index=False)
     print("RESEARCH REPLAY | ICU history, not ER validation or clinical guidance")

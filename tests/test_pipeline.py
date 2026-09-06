@@ -103,6 +103,13 @@ def test_end_to_end_replay_matches_batch_and_rejects_training_patient(tmp_path):
     counted = logistic["test"]["subgroups"]["age_band"]
     assert sum(level["patients"] for level in counted.values()) == logistic["test"]["patients"]
     assert "calibrated_score" in pd.read_csv(run / "test_predictions.csv").columns
+    saved = pd.read_csv(run / "test_predictions.csv")
+    np.testing.assert_array_equal(saved[saved.patient == pid].hour, result.hour)
+    from ertriage.workload import workload
+    workload(root, run, tmp_path / "workload", draws=20)
+    audited = pd.read_csv(tmp_path / "workload" / "patient_workload.csv").set_index("patient")
+    assert audited.loc[pid, "adaptive"] == result.review_now.sum()
+    assert report["models"]["prevalence"]["validation"]["alert_hours_per_100"] == 0
     train_pid = pd.read_csv(run / "train_patients.csv").patient.iloc[0]
     with pytest.raises(ValueError, match="held-out"):
         replay(root, run, train_pid)

@@ -104,16 +104,21 @@ def patient_attributes(df):
     return dict(age_band=band, gender=gender, unit=unit)
 
 
-def features(df):
-    """Prefix invariant: no labels, backwards fill, or future aggregates."""
-    raw = df[COLUMNS].reset_index(drop=True)
-    observed = raw.notna()
-    filled = raw.ffill()
-    t = np.arange(len(raw))
+def observation_ages(df):
+    """Elapsed recorded hours since each vital was observed, using history only."""
+    observed = df[VITALS].notna().reset_index(drop=True)
+    t = np.arange(len(df))
     ages = {}
     for col in VITALS:
         last = np.maximum.accumulate(np.where(observed[col], t, -1))
         ages[col + "_age"] = np.where(last >= 0, t - last, 999)
+    return pd.DataFrame(ages)
+
+
+def features(df):
+    """Prefix invariant: no labels, backwards fill, or future aggregates."""
+    raw = df[COLUMNS].reset_index(drop=True)
+    filled = raw.ffill()
     return pd.concat([filled, raw.isna().astype(float).add_suffix("_missing"),
                       filled[VITALS].diff(3).add_suffix("_change3"),
-                      pd.DataFrame(ages)], axis=1).astype(np.float32)
+                      observation_ages(df)], axis=1).astype(np.float32)

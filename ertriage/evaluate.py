@@ -110,7 +110,9 @@ def recalibrator(y, p):
 
 def recalibrate(fit, p):
     """Apply a frozen recalibration map to scores or to a threshold."""
-    return 1 / (1 + np.exp(-(fit["intercept"] + fit["slope"] * logit(p))))
+    mapped = 1 / (1 + np.exp(-(fit["intercept"] + fit["slope"] * logit(p))))
+    # Preserve the budget rule's no-alert sentinel through clipped log-odds.
+    return np.where(np.asarray(p) > 1, np.nextafter(1., np.inf), mapped)
 
 
 def subgroup_metrics(y, p, threshold, ids, levels):

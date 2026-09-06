@@ -2,6 +2,56 @@
 
 Completed on 2026-09-05 using Python 3.12.14 and the pinned environment. This is retrospective ICU development, not ER validation. Every number below is a development metric; none establishes clinical utility, safety, or ER performance.
 
+## Early-warning evaluation and visual replay
+
+The existing frozen boosting scores now have patient-level timing evaluation. No model was retrained and no threshold was changed. The onset proxy is the first observed 0-to-1 label transition plus six hours, following the [dataset label definition](https://physionet.org/content/challenge-2019/1.0.0/). It is derived from the existing target, not an independent clinical event.
+
+The primary timing denominator requires the complete inclusive `[onset-12, onset-6]` window and the onset proxy inside the recorded stay. These are new descriptive analysis conventions applied to already-inspected test cohorts, not a prospectively registered evaluation or clinical timing requirement. An ongoing alert counts when it overlaps that window.
+
+| Timing result | Random split | Site-held-out |
+|---|---:|---:|
+| Patients with a positive label | 587 | 1,142 |
+| Timing-eligible patients | 421 | 802 |
+| Warned in the 12-to-6-hour window | 107 / 421 (25.4%) | 155 / 802 (19.3%) |
+| 95% patient-bootstrap interval | 21.3–29.8% | 16.7–22.0% |
+| Missed that early window | 314 | 647 |
+| Any alert in `[onset-12, onset)` | 34.4% [29.8–38.9%] | 25.8% [22.6–29.1%] |
+| No alert in that before-onset interval | 276 | 595 |
+| Nonsepsis patients receiving any alert | 1.80% [1.51–2.10%] | 1.17% [1.01–1.32%] |
+| Alert episodes per 100 recorded hours | 0.414 [0.345–0.486] | 0.246 [0.217–0.273] |
+| Repeated episodes per 100 recorded hours | 0.304 [0.240–0.371] | 0.178 [0.152–0.202] |
+
+An episode is a consecutive run of threshold-positive hours, separated from another episode by at least one threshold-negative hour. Repeated episodes are episodes after the first in a stay. Episode rates use all recorded hours; timing detection rates use eligible positive-label patients. Intervals use 1,000 whole-patient bootstrap draws with seed 42.
+
+Timing exclusions were 90 positive-at-start records, 70 incomplete windows, and 6 onset proxies beyond the record on the random split; corresponding site-held-out counts were 223, 104, and 13. No nonpersistent label sequences occurred in these test cohorts. Their alert workload remains counted even when timing is excluded. These exclusions change the population being described; the eligible rates must not be presented as sensitivity for all sepsis patients.
+
+The main finding is limited early-window coverage at the existing placeholder alert budget: most eligible positive-label patients had no alert in the chosen window. That is a retrospective window miss, not a clinical missed diagnosis. The two test cohorts overlap, use different training populations, and must not be pooled as independent replications.
+
+The new local dashboard provides play/pause, stepping, scrubbing, patient selection, vital-sign gaps, score/threshold traces, and separate review and alert markers. Future scores and labels are hidden in ordinary playback; a retrospective toggle reveals the full trace and onset-proxy window. It uses the same review scheduler as command-line replay. The matching cohort evaluation appears beside the patient view. Run instructions are in README.md, and `dashboard-demo.ps1` launches the viewer.
+
+Local outputs: `artifacts/early-warning-full-random-42` and `artifacts/early-warning-full-site-42`. Each contains a Markdown summary, JSON with definitions and provenance hashes, and per-patient warning/episode counts. All 28 Python tests pass, including timing-window boundaries, censoring/exclusions, undefined denominators, patient-history verification and read-only HTTP routes.
+
+## Review workload audit added 2026-09-05
+
+The adaptive review policy has now been evaluated across both existing full-cohort test sets, using their frozen selected-model scores and original hourly observations. This audit fits nothing and does not choose a policy. Each fixed schedule starts at the first recorded hour of each stay; consequently, fixed two- and four-hour schedules have slightly more than 50 and 25 reviews per 100 hours on finite stays.
+
+| Schedule | Random split: reviews / 100 hours [95%] | Site-held-out: reviews / 100 hours [95%] |
+|---|---:|---:|
+| Adaptive | 55.66 [55.05, 56.29] | 44.86 [44.63, 45.11] |
+| Fixed every hour | 100.00 [100.00, 100.00] | 100.00 [100.00, 100.00] |
+| Fixed every 2 hours | 50.64 [50.62, 50.65] | 50.64 [50.63, 50.65] |
+| Fixed every 4 hours | 25.97 [25.95, 25.99] | 25.97 [25.95, 25.98] |
+
+There are 172,306 adaptive review events across 309,558 hours for 8,068 random-split patients, and 341,860 across 761,995 hours for 20,000 site-held-out patients. The two test sets overlap and must not be pooled as independent cohorts. Intervals use 1,000 whole-patient resamples with seed 42; JSON outputs also contain paired adaptive-minus-fixed differences.
+
+Missing or stale vitals force review in **36.8% of random-split hours and 22.4% of site-held-out hours**. Adaptive review therefore creates more events than a fixed two-hour schedule in the random split, but fewer on the held-out site. This demonstrates that the placeholder 2% validation **alert-hour** budget is not a **review-event** budget. Neither review counts nor their differences establish staffing requirements, clinical benefit, or a preferable schedule. All measurements still arrive hourly, and fixed schedules do not respond to missingness or scores.
+
+Reproduce with the `workload` commands in README.md. Local outputs are in `artifacts/workload-full-random-42` and `artifacts/workload-full-site-42`, each containing a Markdown report, JSON with source/code hashes, and per-patient counts. Patient hashes, development/test separation, prediction counts and ordered labels were verified. These historical prediction files lack explicit hour keys, so the audit assumes their original within-patient row order is intact. New training outputs include hour keys for an additional alignment check.
+
+**Budget-rule correction:** the old rule returned the highest observed score when no threshold satisfied the budget. Tied scores could therefore exceed capacity; in particular the constant prevalence baseline alerted on 100% of hours. New training chooses no alerts in that case and preserves the decision through recalibration. The historical training tables below retain the old results, including that prevalence-baseline bug. No full model retraining was performed for this audit; the two workload reports use the existing frozen boosting thresholds.
+
+Verification for this addition: 19 tests pass, including budget ties and endpoint scores, causal scheduling and early interruption, paired workload resampling, artifact-integrity failures, and training-to-audit-to-replay consistency. The full random-split replay still runs, and `pip check` reports no broken requirements.
+
 ## What the full cohort changed
 
 Earlier releases trained on a seeded 2,000-patient subsample. Training on all 40,336 patients **retracts two of the previous headline findings and sharpens a third.** Both are recorded here rather than quietly replaced.

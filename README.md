@@ -48,6 +48,17 @@ Below `--limit 0` the seed selects the patient subset as well, so subsampled see
 
 The default replay is the first test patient in sorted manifest order, selected without consulting outcomes. Pick a specific test patient using `--patient site_A/p000001.psv` (use an actual identifier from `test_patients.csv`). Replay prints hourly scores and illustrative review events, and saves CSV output locally.
 
+Audit review workload across every held-out patient using an existing run:
+
+```powershell
+.\.venv\Scripts\python.exe -m ertriage workload --run artifacts/full-random-42 --out artifacts/workload-full-random-42
+.\.venv\Scripts\python.exe -m ertriage workload --run artifacts/full-site-42 --out artifacts/workload-full-site-42
+```
+
+Each audit writes `WORKLOAD.md`, `workload.json`, and `patient_workload.csv` into a new directory. It compares the existing adaptive policy with fixed 1-, 2-, and 4-hour schedules, all starting at the first recorded hour. It reports review counts, missing/stale-observation workload, and paired patient-bootstrap intervals (`--draws`, default 1000; `--seed`, default 42). Patient files must match the training manifest hashes, test patients must be separate from development patients, and prediction counts and ordered labels must match the source. New training runs also save explicit hour keys for alignment checks; older runs rely on their saved within-patient row order. No models or thresholds are fitted and no policy is selected by this audit.
+
+**Review events and alert hours are different quantities.** The alert budget constrains threshold crossings on validation data; it does not constrain the adaptive scheduler, whose missingness rule can force hourly reviews. Fixed schedules ignore score changes and missingness. These comparisons measure simulated review counts, not staff time, outcome effects, or which policy is clinically preferable. All original measurements continue to arrive.
+
 After the first run, `powershell -ExecutionPolicy Bypass -File .\replay-demo.ps1` launches the demo from any current directory when given the script's full path. This flag applies only to that PowerShell process.
 
 For a new machine, use Python 3.12: `python -m venv .venv`, then `.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt`. The lock file records all installed dependencies. Linux/macOS commands use `.venv/bin/python`.
@@ -70,9 +81,9 @@ Features include the 40 current/forward-filled values, current missingness flags
 
 Baselines are a prevalence-only predictor, unweighted logistic regression, and histogram gradient boosting. Both remaining choices are made on validation patients and frozen before any test hour is scored. No test tuning or clinical interpretation of the threshold is justified.
 
-The **threshold rule** sets the operating point. `budget` (default) takes the lowest threshold whose validation alert load stays within `--alert-budget` alert hours per 100, making the operating point a stated capacity rather than the argmax of a noisy curve. `f1` maximizes hourly F1 and `utility` maximizes the official patient-weighted utility; RESULTS.md shows the first swings alert load tenfold across seeds and the second buys score by alerting on up to 29% of all hours.
+The **threshold rule** sets the operating point. `budget` (default) takes the lowest observed threshold whose validation alert load stays within `--alert-budget` alert hours per 100. If even the highest tied score exceeds the budget, it chooses a finite threshold just above 1, meaning no alerts; recalibration preserves that decision. The budget is only a validation constraint and held-out alert rates can exceed it. `f1` maximizes hourly F1 and `utility` maximizes the official patient-weighted utility; RESULTS.md shows the first swings alert load tenfold across seeds and the second buys score by alerting on up to 29% of all hours.
 
-The **selection rule** decides which baseline is reported. `stable` (default) takes the validation average-precision leader, then runs a paired patient bootstrap on validation predictions; when the interval for the average-precision difference includes zero, the leader is not distinguishable from the simpler model and the simpler model is reported, in the prespecified order logistic before boosting. Prevalence stays a reference baseline and is never selected. `ap` reports the bare leader. Across ten runs no validation margin excluded zero, so this is a tie-breaking convention for reproducibility, not evidence that the simpler model generalizes better.
+The **selection rule** decides which baseline is reported. `stable` (default) takes the validation average-precision leader, then runs a paired patient bootstrap on validation predictions; when the interval for the average-precision difference includes zero, the leader is not distinguishable from the simpler model and the simpler model is reported, in the prespecified order logistic before boosting. Prevalence stays a reference baseline under `stable`. `ap` reports the bare leader. The ten earlier subsampled runs could not resolve a margin, while both full-cohort runs selected boosting with intervals excluding zero. This is a selection convention, not evidence that an unresolved comparison establishes equivalence.
 
 Artifacts include exact patient manifests and file hashes, serialized models, hourly held-out predictions for the selected model, and `metrics.json` with AUROC, average precision, Brier score, confusion counts, precision/recall, alert hours per 100 hours, and the fraction of nonsepsis patients receiving any alert. Manifests also carry each patient's source site and recorded age band, gender code and ICU-unit indicator, which are read from the first hour and used only to describe held-out subgroups. Hourly metrics weight long stays more heavily.
 
@@ -92,6 +103,30 @@ RESULTS.md reports the full-cohort runs and records what training on all 40,336 
 
 ## Historical replay
 
+### Visual dashboard and early-warning evaluation
+
+The local dashboard shows recorded vitals with missing-measurement gaps, frozen model scores, threshold alerts, and the existing adaptive review schedule. It supports play/pause, one-hour stepping, a keyboard-accessible time slider, patient search and previous/next navigation, seven vital-sign traces, and an hourly values table. Ordinary replay displays the current history prefix. An explicit retrospective toggle reveals the full record, labels, the onset proxy and warning window, plus first-alert and repeated-episode counts. Loading another patient resets the toggle. The first record is selected by sorted identifier without inspecting outcomes.
+
+```powershell
+.\.venv\Scripts\python.exe -m ertriage early-warning --run artifacts/full-random-42 --out artifacts/early-warning-full-random-42
+.\.venv\Scripts\python.exe -m ertriage early-warning --run artifacts/full-site-42 --out artifacts/early-warning-full-site-42
+.\.venv\Scripts\python.exe -m ertriage dashboard --run artifacts/full-random-42 --evaluation artifacts/early-warning-full-random-42/early_warning.json
+```
+
+Open [the local dashboard](http://127.0.0.1:8765) after the server starts. Stop with Ctrl+C; `--port` selects another port. `dashboard-demo.ps1` runs the viewer from any working directory and includes the matching evaluation when available. Without `--evaluation`, patient replay still works. The viewer binds only to `127.0.0.1`, serves a fixed set of assets and read-only APIs, and uses no CDN, paid service, extra package, or live patient input. It reads saved predictions without loading serialized models. This is visual playback of frozen research outputs, not newly computed live inference.
+
+Early-warning evaluation writes `EARLY_WARNING.md`, `early_warning.json`, and `patient_warnings.csv` to a new directory. It does not tune the frozen model or threshold. `--draws` and `--seed` control a whole-patient bootstrap (defaults: 1000 and 42). Definitions:
+
+- **Onset proxy:** the first observed 0-to-1 transition in the persistent dataset label, plus six hours. The label has already been shifted by six hours according to [PhysioNet's definition](https://physionet.org/content/challenge-2019/1.0.0/). This is not an independently observed onset.
+- **Timing denominator:** positive-label patients with a recoverable transition, the onset proxy inside the recorded stay, and a fully observed 12-to-6-hour pre-onset window. Positive-at-start records, nonpersistent labels, onset beyond the record, and incomplete windows are counted separately and excluded from timing fractions.
+- **Early warning:** any threshold-positive hour in the inclusive `[onset-12, onset-6]` window. An alert episode already in progress counts if it overlaps the window. This analysis window is not a clinician-specified requirement.
+- **Before-onset detection:** any threshold-positive hour from `onset-12` up to but excluding onset. Very early, unrelated alerts and alerts at/after onset do not count.
+- **Alert episodes:** contiguous threshold-positive hours. At least one threshold-negative hour separates episodes. Repeated episodes are all episodes after the first within each stay; no clinical cooldown is assumed.
+- **Misses and false alerts:** missed timing windows among eligible positive-label patients, and any alert among patients whose recorded labels remain zero. These describe recorded labels and must not be read as clinical diagnoses or missed diagnoses.
+- **Lead time:** per-patient first-alert timing is retained, and early-window lead-time summaries include detected eligible patients only. They exclude misses and can be affected by alerts already active at the start of the window.
+
+The early-warning and dashboard readers check patient hashes, split separation, score validity, row counts and ordered labels; explicit hour keys are checked where present. Older prediction files still rely on their original within-patient row order. A supplied cohort evaluation must match the loaded run's source hashes.
+
 Replay accepts held-out patients only and recomputes each prediction from the visible history prefix. Future observations and retrospective labels are excluded from scoring and scheduling. Labels are displayed only for retrospective comparison.
 
 Replay also prints a `calibrated_score` column when the run recorded a recalibration map. Because that map is monotone, it changes no review event. An illustrative policy schedules review after 1, 2, or 4 hours based on score, score increase, and observation age. Any vital absent or at least four hours old forces a one-hour review. Review events can occur early when scores rise. All recorded hourly measurements still arrive in this simulation: the policy changes review events, **not measurement acquisition**, and cannot estimate outcomes under a different monitoring schedule. It does not make treatment, triage, discharge, or real-world timing recommendations. Neither policy thresholds nor review intervals have clinical validation.
@@ -102,6 +137,12 @@ Replay also prints a `calibrated_score` column when the run recorded a recalibra
 - `ertriage/model.py`: patient splits, baselines, threshold rules, model selection and evaluation.
 - `ertriage/evaluate.py`: official utility scoring, calibration, validation-fitted recalibration, subgroup description, selection margins and patient bootstrap.
 - `ertriage/replay.py`: prefix-only replay and illustrative cadence.
+- `ertriage/workload.py`: held-out review workload, artifact checks, fixed schedule comparisons and paired patient-bootstrap intervals.
+- `ertriage/history.py`: verified access to frozen held-out patient histories.
+- `ertriage/early_warning.py`: onset-proxy timing, missed windows, false alerts, repeated episodes and patient-bootstrap intervals.
+- `ertriage/dashboard.py` and `ertriage/static/`: local browser replay and evaluation viewer.
+- `tests/test_early_warning.py`: timing boundaries, exclusions, denominator checks, artifact checks and local HTTP tests.
+- `tests/test_workload.py`: budget ties, causal scheduling, workload intervals and artifact-integrity regression tests.
 - `tests/test_pipeline.py`: leakage, split, utility, calibration, recalibration, subgroup, threshold-rule, selection, bootstrap, validation and policy regression tests.
 - `artifacts/`: local run outputs; `data/`: local records and download provenance.
 

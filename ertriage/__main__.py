@@ -3,6 +3,9 @@ import argparse
 from .data import download
 from .model import train
 from .replay import replay
+from .workload import workload
+from .early_warning import early_warning
+from .dashboard import dashboard
 
 
 def main():
@@ -31,6 +34,23 @@ def main():
     r.add_argument("--data", default="data/physionet2019")
     r.add_argument("--run", default="artifacts/baseline")
     r.add_argument("--patient")
+    w = sub.add_parser("workload", help="Audit frozen review workload across all held-out patients")
+    w.add_argument("--data", default="data/physionet2019")
+    w.add_argument("--run", required=True)
+    w.add_argument("--out", required=True, help="New directory for workload outputs")
+    w.add_argument("--seed", type=int, default=42)
+    w.add_argument("--draws", type=int, default=1000)
+    e = sub.add_parser("early-warning", help="Evaluate patient-level warning timing and repeated alerts")
+    e.add_argument("--data", default="data/physionet2019")
+    e.add_argument("--run", required=True)
+    e.add_argument("--out", required=True)
+    e.add_argument("--seed", type=int, default=42)
+    e.add_argument("--draws", type=int, default=1000)
+    v = sub.add_parser("dashboard", help="Serve a local read-only visual patient replay")
+    v.add_argument("--data", default="data/physionet2019")
+    v.add_argument("--run", required=True)
+    v.add_argument("--port", type=int, default=8765)
+    v.add_argument("--evaluation", help="Matching early_warning.json to display cohort findings")
     args = parser.parse_args()
     try:
         if args.command == "download":
@@ -46,6 +66,18 @@ def main():
                 parser.error("--alert-budget must be within (0, 100] alert hours per 100")
             train(args.data, args.out, args.limit, args.seed, args.split, args.draws,
                   args.threshold, args.alert_budget, args.select)
+        elif args.command == "workload":
+            if args.draws < 1:
+                parser.error("--draws must be positive")
+            workload(args.data, args.run, args.out, seed=args.seed, draws=args.draws)
+        elif args.command == "early-warning":
+            if args.draws < 1:
+                parser.error("--draws must be positive")
+            early_warning(args.data, args.run, args.out, args.seed, args.draws)
+        elif args.command == "dashboard":
+            if not 1 <= args.port <= 65535:
+                parser.error("--port must be within 1..65535")
+            dashboard(args.data, args.run, args.port, args.evaluation)
         else:
             replay(args.data, args.run, args.patient)
     except (ValueError, FileNotFoundError) as exc:
