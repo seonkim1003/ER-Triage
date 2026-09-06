@@ -14,14 +14,80 @@ The dataset label is persistent: once it turns 1 it stays 1 until the record end
 
 | Matched on | Comparisons | Event target better | Mean difference | Range |
 |---|---:|---:|---:|---:|
-| Alert hours per 100 | 11 | 1 | -1.1pp | -3.3 to +1.9 |
-| Nonsepsis patients alerted | 12 | 12 | +4.8pp | +1.5 to +9.8 |
+| Alert hours per 100 | 11 | 1 | -1.11pp | -3.3 to +1.9 |
+| Nonsepsis patients alerted | 12 | 12 | +4.84pp | +1.5 to +9.8 |
+
+Both splits at seed 42, both model families. `sweep` produces this table; the section below varies the seed and the horizon, because one seed at one horizon established nothing on its own.
 
 **The target changes how a fixed alert budget is spread, not how much it detects.** Matched on alert hours the persistent target is equal or slightly ahead almost everywhere. Matched on how many patients are disturbed, the event target is ahead in every one of twelve comparisons, across both splits and both model families. It concentrates the same alert hours onto fewer distinct patients and fewer episodes: on the random split at a 2% budget, boosting alerts on 0.92% of nonsepsis patients against 1.80%, with 0.276 episodes per 100 hours against 0.414.
 
 Which of those two denominators is the real constraint is a review-capacity question, and it remains the case that nobody qualified has stated one. **Neither target is therefore preferable on this evidence**; they are preferable under different and unstated denominators. The site-split result at the default budget looks like a clear win for the event target, 24.7% [21.8, 27.8] against 19.3% [16.7, 22.0], but that comparison is not like-for-like: it spends 2.51 alert hours per 100 against 1.44. The matched-burden table is the honest version and shows a smaller, denominator-dependent effect.
 
-The official PhysioNet utility is defined against the persistent label and its timing, so it is left undefined for this target rather than recomputed against a different one, and `--threshold utility` is refused. Every recorded hour is still scored and saved, so the timing, workload, replay and dashboard tools read complete records under either target. Local outputs: `artifacts/event12-*-42`, `artifacts/basis-full-*-42`, `artifacts/sweep-*.csv` and `artifacts/matched-burden.csv`.
+The official PhysioNet utility is defined against the persistent label and its timing, so it is left undefined for this target rather than recomputed against a different one, and `--threshold utility` is refused. Every recorded hour is still scored and saved, so the timing, workload, replay and dashboard tools read complete records under either target. Reproduce the table with `sweep --run artifacts/full-random-42 --against artifacts/event12-random-42`. Local outputs: `artifacts/event12-*-42`, `artifacts/basis-full-*-42` and `artifacts/sweep-full-vs-event12-*`.
+
+## Seed and horizon sensitivity of the burden finding
+
+This project has retracted findings twice for resting on one sample, and its own seed sweep found model selection flipping on validation margins of 0.0002. The matched-burden result above was one seed at one horizon, so it was not established. Both knobs were varied.
+
+Four independent random splits, event target at horizon 12 against the persistent target. Each seed repartitions train, validation and test, so these are different cohorts and not resamples of one.
+
+| Seed | Hours: better | Mean | Patients: better | Mean | Range |
+|---|---:|---:|---:|---:|---:|
+| 42 | 1/6 | -0.76pp | 6/6 | +6.40pp | +4.3 to +9.8 |
+| 1 | 0/6 | -1.55pp | 6/6 | +7.98pp | +3.5 to +12.9 |
+| 7 | 3/6 | -0.51pp | 6/6 | +3.53pp | +1.8 to +5.1 |
+| 13 | 0/6 | -1.43pp | 6/6 | +5.31pp | +3.8 to +7.0 |
+
+**The direction is seed-stable.** Every seed puts the event target ahead on all six patient-matched comparisons and behind or level on most hours-matched ones. The size moves, +3.53 to +7.98 points, which is the honest width of the effect.
+
+Horizon, at seed 42 on the random split:
+
+| Horizon | Hours: better | Mean | Patients: better | Mean |
+|---|---:|---:|---:|---:|
+| 6 | 3/6 | +0.28pp | 6/6 | +4.36pp |
+| 8 | 2/6 | -0.14pp | 6/6 | +5.80pp |
+| 12 | 1/6 | -0.76pp | 6/6 | +6.40pp |
+| 24 | 1/6 | -1.96pp | 6/6 | +9.75pp |
+
+**Both denominators respond monotonically to the horizon**, in opposite directions, across every step tested. That is a dose-response to a parameter set deliberately, which is harder to explain as chance than any single comparison, and it turns the finding into a dial rather than a setting. Horizon 6 is roughly free on alert hours while still gaining on patients; horizon 24 buys the most on patients and costs the most on hours.
+
+Horizon 6 also isolates the mechanism. At that horizon the event label restricted to pre-onset hours is provably identical to the persistent label there, so training differs in exactly one respect: hours at or after the onset proxy are dropped from the training set. Nothing is relabelled. That alone earns +4.36 points on the patient denominator. Excluding post-onset hours from fitting is doing most of the work, and widening the positive window adds the rest.
+
+Across every configuration run here, two splits, four seeds, four horizons and both model families, the event target is ahead on **48 of 48** patient-matched comparisons and on **10 of 47** hours-matched ones. Neither target is thereby preferable: the two denominators disagree, and which one binds is the review capacity nobody qualified has stated. What has changed is that the disagreement is now measured and stable rather than a single observation.
+
+## Review workload barely notices the target
+
+The findings above are about which hours alert. The review policy is a different thing: it schedules review from scores, score changes and observation age, and any vital absent or four hours stale forces review regardless of score. Running the existing audit against the event-target runs asks whether a target that halves alerted patients also lightens review.
+
+| Split | Persistent, reviews/100h [95%] | Event target, reviews/100h [95%] | Difference | Hours forced by stale vitals |
+|---|---:|---:|---:|---:|
+| random | 55.66 [55.05, 56.29] | 55.48 [54.89, 56.12] | -0.19 | 36.8% |
+| site | 44.86 [44.63, 45.11] | 45.56 [45.27, 45.85] | +0.70 | 22.4% |
+
+**It does not.** The adaptive review rate moves by well under a percent in either direction, while the same models differ by roughly a factor of two in how many nonsepsis patients they alert on. The reason is the last column: review is dominated by missing and stale observations, which no model changes. This sharpens the earlier finding that a 2% alert-hour budget is not a review-event budget. Alert burden and review burden are close to independent here, so improving one should not be expected to move the other, and a review capacity stated in reviews would not constrain the alert threshold much at all. Local outputs: `artifacts/workload-event12-random-42` and `artifacts/workload-event12-site-42`.
+
+## Cross-site recalibration measured, not asserted
+
+"Cross-site recalibration that actually transfers" sat on the remaining work list as a goal with no measurement attached. `transfer` fits a Platt map on k patients from the held-out site and scores the held-out patients that sample never touched, twenty draws per k, against two references: no correction at all, and the run's own frozen source-fitted map. Nothing is refitted and no model file is loaded.
+
+Calibration slope, median [interquartile range across draws]. A slope below 1 means scores that are too extreme; 20,000 unseen-site patients and 8,068 within-source patients.
+
+| Patients used to fit | Site: uncorrected | Site: source map | Site: fitted on target | Random: uncorrected | Random: source map | Random: fitted on target |
+|---:|---:|---:|---:|---:|---:|---:|
+| 25 | 0.788 | 0.802 | 0.607 [0.379, 0.827] | 0.902 | 0.986 | 0.639 |
+| 50 | 0.788 | 0.802 | 1.258 [0.849, 1.711] | 0.903 | 0.987 | 0.877 |
+| 100 | 0.788 | 0.802 | 0.891 [0.660, 1.120] | 0.904 | 0.988 | 0.955 |
+| 250 | 0.788 | 0.803 | 1.073 [0.897, 1.293] | 0.901 | 0.985 | 0.919 |
+| 500 | 0.788 | 0.802 | 0.988 [0.833, 1.138] | 0.902 | 0.986 | 0.981 |
+| 1,000 | 0.787 | 0.802 | 0.996 [0.948, 1.054] | 0.903 | 0.987 | 0.996 |
+
+**The existing map closes 7% of the cross-site gap.** It moves the slope from 0.787 to 0.802 against a target of 1. That is what "does not transfer" had meant qualitatively, now with a number on it. Fitting on target-site patients closes 98% of it, reaching 0.996 [0.948, 1.054] at 1,000 patients, and Brier falls from 0.01388 to 0.01358.
+
+**Below roughly 250 target patients, recalibrating is worse than leaving the scores alone.** At 25 patients the slope lands at 0.607, further from 1 than the 0.788 it started from, and the interquartile range spans 0.448; at 50 it overshoots to 1.258. Roughly one hour in sixty carries a positive label, so a few dozen patients supply too few positive hours to pin a two-parameter map. The intuition that a little local data must help is wrong here, and the failure is quiet: a map fitted on 25 patients returns confident, worse-calibrated scores rather than an error.
+
+Within source the picture inverts, which is the control this needs. There the source map is fitted on far more patients than any k tested and reaches 0.987, so target fitting only catches up at around 1,000 patients and never beats it by much. Recalibration is worth doing where it was already known not to transfer, and close to pointless where it already worked.
+
+So the item is answerable and the answer has a price: on the order of a thousand labelled patients from the new site. In deployment that means waiting for a thousand patients' outcomes before the calibration can be trusted, which is a real constraint rather than a free fix. This is also an upper bound: fitting and scoring inside one frozen cohort shares that cohort's idiosyncrasies, and it presumes labelled target outcomes already exist. Local outputs: `artifacts/transfer-full-site-42` and `artifacts/transfer-full-random-42`.
 
 ## Subgroup contrasts replace the uncontrolled descriptions
 
@@ -42,7 +108,9 @@ Because it reads a frozen run rather than running inside training, this applies 
 
 ## Verification for these additions
 
-All 54 tests pass, up from 28. New coverage: the horizon-6 label identity and that it holds only at that horizon, pre-onset masking and exclusion of unrecoverable transitions, the proof that masking features after the fact equals truncating the record first (without which post-onset physiology could leak backwards into fitted hours), Holm against its step-down definition, planted and null subgroup differences, binary-descriptor deduplication, and both new commands end to end.
+All 63 tests pass, up from 28 before this branch. New coverage: the horizon-6 label identity and that it holds only at that horizon, pre-onset masking and exclusion of unrecoverable transitions, the proof that masking features after the fact equals truncating the record first (without which post-onset physiology could leak backwards into fitted hours), Holm against its step-down definition, planted and null subgroup differences, binary-descriptor deduplication, burden matching that refuses to extrapolate past a measured budget, recalibration that never scores a patient with a map fitted on itself, and every new command end to end.
+
+The burden comparison was first produced by a throwaway script, which left the central table of this release unreproducible from the repository. It is now the `sweep` command, and the command reproduces the original numbers exactly.
 
 Re-running the persistent target under the new code reproduces both frozen full-cohort runs exactly, across 309,558 and 761,995 predictions, with identical AUROC, average precision, threshold and utility. Every module hash recorded in each new run matches the shipped code, so these numbers are reproducible from a clean checkout.
 

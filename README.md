@@ -172,6 +172,37 @@ a whole-patient bootstrap interval, and Holm-Bonferroni across the whole family.
 exactly two levels contributes one contrast, not two mirrored ones. It reads a frozen run, so it can
 be applied to runs trained before it existed. It remains a post-hoc description of one cohort.
 
+### Coverage against alert burden
+
+One operating point cannot compare two models that spend alerts differently, and the nominal budget
+does not fix it: the same 2% validation budget produces different test alert loads under different
+targets. `sweep` sweeps the validation alert-hour budget over a grid, fixing each threshold on
+validation alone before the held-out cohort is scored, and interpolates two runs to common burden.
+Burden has two denominators that need not agree, alert hours and how many patients are disturbed.
+
+```powershell
+.\.venv\Scripts\python.exe -m ertriage sweep --run artifacts/full-random-42 --against artifacts/event12-random-42 --out artifacts/sweep-full-vs-event12-random
+```
+
+It reads each run's own target from `metrics.json`, so runs trained before the event target existed
+sweep correctly as persistent. Reading a run's validation scores means loading the model it saved, so
+as in replay, only load `.joblib` files this project generated locally.
+
+### Cross-site recalibration transfer
+
+`transfer` measures what the standing "recalibration that transfers" item costs. A Platt map is
+fitted on `k` held-out-site patients and scored on the held-out patients that sample never touched,
+over a grid of `k` with several draws each, against two references: no correction, and the run's
+frozen source-fitted map.
+
+```powershell
+.\.venv\Scripts\python.exe -m ertriage transfer --run artifacts/full-site-42 --out artifacts/transfer-full-site-42
+```
+
+It is not prospective. It presumes labelled outcomes from the target site already exist, which in
+deployment means having waited for them, and a map fitted and scored within one frozen cohort is an
+upper bound on what a real transfer would achieve. No model file is loaded.
+
 ## Layout
 
 - `ertriage/data.py`: download, schema checks and causal features.
@@ -180,6 +211,8 @@ be applied to runs trained before it existed. It remains a post-hoc description 
 - `ertriage/target.py`: the event-anchored prediction target and its pre-onset mask.
 - `ertriage/basis.py`: re-scores a frozen run on the pre-onset basis without refitting.
 - `ertriage/contrasts.py`: prespecified subgroup contrasts with intervals and Holm correction.
+- `ertriage/sweep.py`: coverage against alert burden, thresholds chosen on validation.
+- `ertriage/transfer.py`: how much target-site data recalibration needs before it transfers.
 - `ertriage/replay.py`: prefix-only replay and illustrative cadence.
 - `ertriage/workload.py`: held-out review workload, artifact checks, fixed schedule comparisons and paired patient-bootstrap intervals.
 - `ertriage/history.py`: verified access to frozen held-out patient histories.
@@ -190,8 +223,10 @@ be applied to runs trained before it existed. It remains a post-hoc description 
   masking late equals truncating first.
 - `tests/test_contrasts.py`: Holm correction, planted and null subgroup differences.
 - `tests/test_basis.py`: pre-onset re-scoring, the horizon-6 identity, and contrast artifacts.
+- `tests/test_sweep_transfer.py`: burden matching without extrapolation, and recalibration that
+  never scores a patient with a map fitted on itself.
 - `tests/test_workload.py`: budget ties, causal scheduling, workload intervals and artifact-integrity regression tests.
 - `tests/test_pipeline.py`: leakage, split, utility, calibration, recalibration, subgroup, threshold-rule, selection, bootstrap, validation and policy regression tests.
 - `artifacts/`: local run outputs; `data/`: local records and download provenance.
 
-Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Prespecified subgroup contrasts with intervals and Holm correction, and an event-anchored target that is not the provided persistent label, are now implemented. Remaining work: a review capacity stated by someone qualified to state one, cross-site recalibration that actually transfers, clinician-designed policies, and genuinely ER-specific retrospective validation.
+Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Prespecified subgroup contrasts with intervals and Holm correction, an event-anchored target that is not the provided persistent label, coverage-against-burden sweeps, and the measured price of cross-site recalibration are now implemented. Cross-site recalibration does transfer, but only given roughly a thousand labelled patients from the target site, and below a few hundred it is worse than leaving the scores alone. Remaining work: a review capacity stated by someone qualified to state one, clinician-designed policies, and genuinely ER-specific retrospective validation.

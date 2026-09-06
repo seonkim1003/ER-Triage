@@ -8,6 +8,8 @@ from .early_warning import early_warning
 from .dashboard import dashboard
 from .basis import basis
 from .contrasts import contrasts
+from .sweep import BUDGETS, sweep
+from .transfer import SIZES, REPEATS, transfer
 from .target import HORIZON
 
 
@@ -68,6 +70,23 @@ def main():
     k.add_argument("--out", required=True)
     k.add_argument("--seed", type=int, default=42)
     k.add_argument("--draws", type=int, default=1000)
+    w2 = sub.add_parser("sweep", help="Coverage against alert burden, thresholds chosen on validation")
+    w2.add_argument("--data", default="data/physionet2019")
+    w2.add_argument("--run", required=True)
+    w2.add_argument("--against", help="Second run to interpolate to matched burden")
+    w2.add_argument("--out", required=True)
+    w2.add_argument("--budgets", default=",".join(str(b) for b in BUDGETS),
+                    help="Comma-separated validation alert-hour budgets per 100")
+    w2.add_argument("--seed", type=int, default=42)
+    w2.add_argument("--draws", type=int, default=400)
+    x = sub.add_parser("transfer", help="How much target-site data recalibration needs to transfer")
+    x.add_argument("--data", default="data/physionet2019")
+    x.add_argument("--run", required=True)
+    x.add_argument("--out", required=True)
+    x.add_argument("--sizes", default=",".join(str(n) for n in SIZES),
+                   help="Comma-separated target-site patient counts to fit on")
+    x.add_argument("--repeats", type=int, default=REPEATS)
+    x.add_argument("--seed", type=int, default=42)
     v = sub.add_parser("dashboard", help="Serve a local read-only visual patient replay")
     v.add_argument("--data", default="data/physionet2019")
     v.add_argument("--run", required=True)
@@ -108,6 +127,26 @@ def main():
             if args.draws < 1:
                 parser.error("--draws must be positive")
             contrasts(args.data, args.run, args.out, args.seed, args.draws)
+        elif args.command == "sweep":
+            if args.draws < 1:
+                parser.error("--draws must be positive")
+            try:
+                budgets = tuple(float(b) for b in args.budgets.split(","))
+            except ValueError:
+                parser.error("--budgets must be comma-separated numbers")
+            if not budgets or not all(0 < b <= 100 for b in budgets):
+                parser.error("--budgets must lie within (0, 100] alert hours per 100")
+            sweep(args.data, args.run, args.out, args.against, budgets, args.seed, args.draws)
+        elif args.command == "transfer":
+            if args.repeats < 1:
+                parser.error("--repeats must be positive")
+            try:
+                sizes = tuple(int(n) for n in args.sizes.split(","))
+            except ValueError:
+                parser.error("--sizes must be comma-separated whole numbers")
+            if not sizes or not all(n > 0 for n in sizes):
+                parser.error("--sizes must be positive patient counts")
+            transfer(args.data, args.run, args.out, sizes, args.repeats, args.seed)
         elif args.command == "dashboard":
             if not 1 <= args.port <= 65535:
                 parser.error("--port must be within 1..65535")
