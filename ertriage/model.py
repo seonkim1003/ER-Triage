@@ -18,8 +18,9 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
-from .data import read_patient, features
-from .evaluate import bootstrap, calibration, normalized_utility, patient_groups, utility_by_patient
+from .data import read_patient, features, patient_attributes
+from .evaluate import (bootstrap, calibration, normalized_utility, patient_groups, recalibrate,
+                       recalibrator, subgroup_metrics, utility_by_patient)
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "2")
 
@@ -83,7 +84,8 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
         df = read_patient(path)
         pid = path.relative_to(root).as_posix()
         frames[pid] = df
-        records.append(dict(patient=pid, ever_sepsis=int(df.SepsisLabel.max()), hours=len(df), sha256=digest))
+        records.append(dict(patient=pid, ever_sepsis=int(df.SepsisLabel.max()), hours=len(df), sha256=digest,
+                            site=pid.split("/")[0], **patient_attributes(df)))
     manifest = pd.DataFrame(records)
     if manifest.ever_sepsis.value_counts().min() < 10 or manifest.ever_sepsis.nunique() != 2:
         raise ValueError("Need at least 10 patients of each class; increase --limit")
@@ -104,8 +106,15 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
         "logistic": make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler(), LogisticRegression(max_iter=1000, random_state=seed)),
         "boosting": HistGradientBoostingClassifier(max_iter=100, max_leaf_nodes=15, l2_regularization=1, early_stopping=False, random_state=seed),
     }
+    descriptors = ["site", "age_band", "gender", "unit"]
+    levels = {name: splits["test"].set_index("patient")[name].to_dict() for name in descriptors}
     report = dict(seed=seed, split=scheme, selected_patients=len(paths), available_patients=len(list(root.glob("site_*/*.psv"))))
-    report.update(python=platform.python_version(), sklearn=sklearn.__version__, models={}, scope="ICU retrospective development only; not ER validation")
+    report.update(python=platform.python_version(), sklearn=sklearn.__version__, models={},
+                  scope="ICU retrospective development only; not ER validation",
+                  subgroups_note="Descriptive splits of one held-out cohort by recorded administrative"
+                                 " fields; no intervals, no multiplicity control, not subgroup validation.",
+                  recalibration_note="Platt map fitted on validation predictions only and applied unchanged"
+                                     " to held-out hours; monotone, so alerts and ranking are unchanged.")
     report["source_sha256"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in sorted(Path(__file__).parent.glob("*.py"))}
     provenance = root / "provenance.json"
@@ -119,7 +128,13 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
             vp = model.predict_proba(vx)[:, 1]
             threshold = threshold_for(vy, vp)
             report["models"][name] = {"validation": metrics(vy, vp, threshold, vi)}
-            joblib.dump(dict(model=model, threshold=threshold, feature_columns=list(x.columns)), output / f"{name}.joblib")
+            # Recalibration is fitted on validation predictions only and frozen before test hours.
+            fit = recalibrator(vy, vp)
+            if fit:
+                fit = dict(fit, mapped_threshold=float(recalibrate(fit, threshold)))
+            report["models"][name]["recalibration"] = fit
+            joblib.dump(dict(model=model, threshold=threshold, feature_columns=list(x.columns),
+                             recalibration=fit), output / f"{name}.joblib")
         selected = max(models, key=lambda n: report["models"][n]["validation"]["average_precision"])
         report["selected_model"] = selected
         # Selection and thresholds are frozen before examining test outcomes.
@@ -129,7 +144,18 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000):
             threshold = report["models"][name]["validation"]["threshold"]
             report["models"][name]["test"] = metrics(ty, p, threshold, ti)
             report["models"][name]["test"]["bootstrap"] = bootstrap(ty, p, threshold, ti, seed=seed, draws=draws)
+            report["models"][name]["test"]["subgroups"] = {
+                name_: subgroup_metrics(ty, p, threshold, ti, level) for name_, level in levels.items()}
+            fit = report["models"][name]["recalibration"]
+            columns = dict(patient=ti, label=ty, score=p)
+            if fit:
+                calibrated = recalibrate(fit, p)
+                columns["calibrated_score"] = calibrated
+                report["models"][name]["test_recalibrated"] = dict(
+                    threshold=fit["mapped_threshold"], brier=float(brier_score_loss(ty, calibrated)),
+                    alerts_identical=bool(np.array_equal(calibrated >= fit["mapped_threshold"], p >= threshold)),
+                    calibration=calibration(ty, calibrated))
             if name == selected:
-                pd.DataFrame(dict(patient=ti, label=ty, score=p)).to_csv(output / "test_predictions.csv", index=False)
+                pd.DataFrame(columns).to_csv(output / "test_predictions.csv", index=False)
     (output / "metrics.json").write_text(json.dumps(report, indent=2, allow_nan=False))
     print(json.dumps(report, indent=2))

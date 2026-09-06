@@ -1,7 +1,9 @@
-"""Held-out evaluation add-ons: official utility scoring, calibration and patient bootstrap.
+"""Held-out evaluation add-ons: utility scoring, calibration, recalibration, subgroups, bootstrap.
 
-Nothing here fits a model or selects a threshold; these functions only describe
-frozen predictions. Development metrics only, not clinical validation.
+Nothing here selects a model or a threshold. The one thing that is fitted is the
+recalibration map, and it is fitted on validation predictions only and then
+applied unchanged to held-out hours. Development metrics only, not clinical
+validation.
 """
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -57,6 +59,72 @@ def normalized_utility(observed, best, inaction):
     return float((observed.sum() - inaction.sum()) / span) if span > 0 else None
 
 
+def logit(p):
+    """Log-odds of a score, clipped away from the open interval's ends."""
+    clipped = np.clip(np.asarray(p, dtype=float), 1e-9, 1 - 1e-9)
+    return np.log(clipped / (1 - clipped))
+
+
+def logit_fit(y, p):
+    """Intercept and slope of an unpenalized logistic fit on logit scores, or (None, None)."""
+    y, p = np.asarray(y), np.asarray(p, dtype=float)
+    if len(np.unique(y)) != 2 or len(np.unique(p)) < 2:
+        return None, None
+    fit = LogisticRegression(penalty=None, max_iter=1000).fit(logit(p).reshape(-1, 1), y)
+    return float(fit.intercept_[0]), float(fit.coef_[0, 0])
+
+
+def recalibrator(y, p):
+    """Platt map fitted on validation predictions only; None when degenerate or not increasing.
+
+    The map is strictly monotone, so it changes reported probabilities, Brier
+    score and reliability, but never the ranking and never which hours alert
+    once the threshold is passed through the same map. Recalibration cannot
+    improve discrimination and is not clinical calibration for an ER.
+    """
+    intercept, slope = logit_fit(y, p)
+    if intercept is None or not np.isfinite([intercept, slope]).all() or slope <= 0:
+        return None
+    return dict(method="platt_logit", fitted_on="validation", intercept=intercept, slope=slope)
+
+
+def recalibrate(fit, p):
+    """Apply a frozen recalibration map to scores or to a threshold."""
+    return 1 / (1 + np.exp(-(fit["intercept"] + fit["slope"] * logit(p))))
+
+
+def subgroup_metrics(y, p, threshold, ids, levels):
+    """Descriptive held-out metrics for patient subgroups assigned before scoring.
+
+    `levels` maps a patient identifier to one recorded administrative label.
+    Nothing is fitted or selected here and no interval is reported: small
+    subgroups give unstable estimates, so these are exploratory descriptions of
+    one cohort, not subgroup validation or evidence about fairness in care.
+    """
+    y, p, ids = np.asarray(y), np.asarray(p, dtype=float), np.asarray(ids)
+    alerts = p >= threshold
+    groups = patient_groups(ids)
+    observed, best, inaction = utility_by_patient(y, alerts, groups)
+    assigned = np.array([str(levels.get(ids[part.start], "unknown")) for part in groups])
+    report = {}
+    for level in sorted(set(assigned)):
+        take = assigned == level
+        rows = np.concatenate([np.arange(part.start, part.stop)
+                               for part, keep in zip(groups, take) if keep])
+        sy, sp, sa = y[rows], p[rows], alerts[rows]
+        hits = float(np.sum(sa & (sy == 1)))
+        report[level] = dict(
+            patients=int(take.sum()), hours=int(len(rows)),
+            positive_hour_fraction=float(sy.mean()),
+            auroc=float(roc_auc_score(sy, sp)) if len(np.unique(sy)) == 2 else None,
+            average_precision=float(average_precision_score(sy, sp)) if sy.any() else None,
+            precision=float(hits / sa.sum()) if sa.any() else None,
+            recall=float(hits / sy.sum()) if sy.any() else None,
+            alert_hours_per_100=float(100 * sa.mean()),
+            normalized_utility=normalized_utility(observed[take], best[take], inaction[take]))
+    return report
+
+
 def calibration(y, p, bins=10):
     """Equal-count reliability table, expected calibration error and a logit recalibration fit."""
     y, p = np.asarray(y, dtype=float), np.asarray(p, dtype=float)
@@ -64,12 +132,7 @@ def calibration(y, p, bins=10):
     table = [dict(count=int(len(g)), mean_score=float(p[g].mean()), observed_rate=float(y[g].mean()))
              for g in parts]
     error = float(sum(len(g) / len(p) * abs(p[g].mean() - y[g].mean()) for g in parts))
-    intercept = slope = None
-    if len(np.unique(y)) == 2 and len(np.unique(p)) > 1:
-        clipped = np.clip(p, 1e-9, 1 - 1e-9)
-        logit = np.log(clipped / (1 - clipped)).reshape(-1, 1)
-        fit = LogisticRegression(penalty=None, max_iter=1000).fit(logit, y)
-        intercept, slope = float(fit.intercept_[0]), float(fit.coef_[0, 0])
+    intercept, slope = logit_fit(y, p)
     # A perfectly calibrated score has intercept 0 and slope 1; slope < 1 means overextended scores.
     return dict(expected_calibration_error=error, intercept=intercept, slope=slope, bins=table)
 

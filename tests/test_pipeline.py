@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from ertriage.data import COLUMNS, features, read_patient
+from ertriage.data import COLUMNS, features, patient_attributes, read_patient
 from ertriage.model import split_patients, threshold_for, metrics
 from ertriage.replay import policy
 
@@ -96,6 +96,13 @@ def test_end_to_end_replay_matches_batch_and_rejects_training_patient(tmp_path):
     with threadpool_limits(limits=2):
         expected = bundle["model"].predict_proba(features(read_patient(root / pid)))[:, 1]
     np.testing.assert_allclose(result.score, expected)
+    logistic = report["models"]["logistic"]
+    assert logistic["recalibration"]["fitted_on"] == "validation"
+    assert logistic["test_recalibrated"]["alerts_identical"]
+    assert set(logistic["test"]["subgroups"]) == {"site", "age_band", "gender", "unit"}
+    counted = logistic["test"]["subgroups"]["age_band"]
+    assert sum(level["patients"] for level in counted.values()) == logistic["test"]["patients"]
+    assert "calibrated_score" in pd.read_csv(run / "test_predictions.csv").columns
     train_pid = pd.read_csv(run / "train_patients.csv").patient.iloc[0]
     with pytest.raises(ValueError, match="held-out"):
         replay(root, run, train_pid)
@@ -180,3 +187,54 @@ def test_bootstrap_is_reproducible_and_resamples_whole_patients():
         assert interval is not None and interval["low"] <= interval["high"], name
     assert first["intervals"]["auroc"]["low"] > .9
     assert 0 < first["intervals"]["normalized_utility"]["low"] <= 1
+
+
+def test_recalibration_is_fitted_on_validation_monotone_and_alert_preserving():
+    from ertriage.evaluate import calibration, recalibrate, recalibrator
+
+    rng = np.random.default_rng(3)
+    truth = rng.random(6000) * .4
+    y = (rng.random(6000) < truth).astype(int)
+    overextended = np.clip(truth * 3, 1e-6, .999)
+    validation, held_out = slice(0, 3000), slice(3000, 6000)
+    fit = recalibrator(y[validation], overextended[validation])
+    assert fit["fitted_on"] == "validation" and fit["slope"] > 0
+    before = calibration(y[held_out], overextended[held_out])
+    after = calibration(y[held_out], recalibrate(fit, overextended[held_out]))
+    assert after["expected_calibration_error"] < before["expected_calibration_error"]
+    assert abs(after["slope"] - 1) < abs(before["slope"] - 1)
+    mapped = recalibrate(fit, .3)
+    assert np.array_equal(recalibrate(fit, overextended) >= mapped, overextended >= .3)
+    assert recalibrator(np.zeros(10, dtype=int), np.linspace(.1, .9, 10)) is None
+
+
+def test_subgroups_partition_the_cohort_and_match_direct_metrics():
+    from sklearn.metrics import roc_auc_score
+
+    from ertriage.evaluate import subgroup_metrics
+
+    rng = np.random.default_rng(2)
+    ids = np.repeat([f"p{i}" for i in range(20)], 24)
+    y = np.concatenate([septic() if i % 2 else np.zeros(24, dtype=int) for i in range(20)])
+    p = np.clip(.05 + .4 * y + rng.normal(0, .1, len(y)), 0, 1)
+    levels = {f"p{i}": ("even" if i % 2 == 0 else "odd") for i in range(19)}
+    result = subgroup_metrics(y, p, .3, ids, levels)
+    assert set(result) == {"even", "odd", "unknown"}
+    assert sum(v["patients"] for v in result.values()) == 20
+    assert sum(v["hours"] for v in result.values()) == len(y)
+    assert result["unknown"]["patients"] == 1  # the unmapped patient is described, not dropped
+    odd = np.isin(ids, [f"p{i}" for i in range(1, 19, 2)])  # p19 is unmapped, so it is not in "odd"
+    assert result["odd"]["auroc"] == pytest.approx(roc_auc_score(y[odd], p[odd]))
+    assert result["odd"]["alert_hours_per_100"] == pytest.approx(100 * (p[odd] >= .3).mean())
+    assert result["even"]["auroc"] is None and result["even"]["average_precision"] is None
+
+
+def test_patient_attributes_bracket_age_and_mark_unrecorded_fields():
+    df = patient()
+    df["Age"], df["Gender"], df["Unit1"], df["Unit2"] = 80.4, 0, 0, 1
+    assert patient_attributes(df) == dict(age_band="age_80_plus", gender="gender_0", unit="unit2")
+    df["Age"], df["Gender"], df["Unit1"], df["Unit2"] = 64.9, 1, np.nan, np.nan
+    assert patient_attributes(df) == dict(age_band="age_50_64", gender="gender_1", unit="unit_unrecorded")
+    df["Age"], df["Unit1"], df["Unit2"] = 49.9, 0, 0
+    assert patient_attributes(df)["age_band"] == "age_lt_50"
+    assert patient_attributes(df)["unit"] == "unit_other"

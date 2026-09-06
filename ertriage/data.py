@@ -80,6 +80,30 @@ def read_patient(path):
     return df
 
 
+def patient_attributes(df):
+    """Recorded administrative descriptors from the first hour, for subgroup description only.
+
+    Age is bracketed; ages above 89 are already masked by the dataset. Gender is
+    the dataset's 0/1 code, documented as female/male but kept unlabelled here
+    because it is an administrative record, not a verified identity. Unit1 and
+    Unit2 are the dataset's two ICU indicators and are absent for a whole source
+    set, so "unknown" is a data-availability level, not a clinical one.
+    """
+    row = df.iloc[0]
+    age = row.Age
+    band = "unknown" if pd.isna(age) else next(
+        name for edge, name in ((50, "age_lt_50"), (65, "age_50_64"), (80, "age_65_79"),
+                                (np.inf, "age_80_plus")) if age < edge)
+    gender = "unknown" if pd.isna(row.Gender) else f"gender_{int(row.Gender)}"
+    if row.Unit1 == 1:
+        unit = "unit1"
+    elif row.Unit2 == 1:
+        unit = "unit2"
+    else:
+        unit = "unit_unrecorded" if pd.isna(row.Unit1) and pd.isna(row.Unit2) else "unit_other"
+    return dict(age_band=band, gender=gender, unit=unit)
+
+
 def features(df):
     """Prefix invariant: no labels, backwards fill, or future aggregates."""
     raw = df[COLUMNS].reset_index(drop=True)

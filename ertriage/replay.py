@@ -6,6 +6,7 @@ import pandas as pd
 from threadpoolctl import threadpool_limits
 
 from .data import read_patient, features, VITALS
+from .evaluate import recalibrate
 
 
 def policy(score, previous, threshold, stale):
@@ -45,9 +46,13 @@ def replay(root, run, patient=None):
                 due = hour + interval
             else:
                 due = min(due, hour + interval)
-            rows.append(dict(hour=int(df.ICULOS.iloc[i]), score=score,
-                             review_now=review, next_review_in_hours=due-hour, reason=reason,
-                             retrospective_label=int(df.SepsisLabel.iloc[i])))
+            row = dict(hour=int(df.ICULOS.iloc[i]), score=score)
+            # The frozen map is monotone, so the cadence below is unchanged by recalibration.
+            if bundle.get("recalibration"):
+                row["calibrated_score"] = float(recalibrate(bundle["recalibration"], score))
+            row.update(review_now=review, next_review_in_hours=due-hour, reason=reason,
+                       retrospective_label=int(df.SepsisLabel.iloc[i]))
+            rows.append(row)
             previous = score
     result = pd.DataFrame(rows)
     dest = run / f"replay_{Path(patient).stem}.csv"
