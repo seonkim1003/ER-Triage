@@ -2,6 +2,50 @@
 
 Completed on 2026-09-05 using Python 3.12.14 and the pinned environment. This is retrospective ICU development, not ER validation. Every number below is a development metric; none establishes clinical utility, safety, or ER performance.
 
+## Event-anchored target added 2026-09-06
+
+The dataset label is persistent: once it turns 1 it stays 1 until the record ends. Two consequences were measured, one of which reverses a hypothesis this section was written to test.
+
+**The training target contradicted the evaluation window.** The early-warning metric above scores alerts in the inclusive seven-hour window `[onset-12, onset-6]`. The persistent label turns 1 at `onset-6`, the window's *final* hour. So exactly one of those seven hours is positive during training: 421 of 2,947 window hours on the random split and 802 of 5,614 across sites, 14.3% in both because the ratio is structural rather than empirical. The model was fitted to stay silent in 85.7% of the window it is then measured on. `--target event --horizon 12` removes the contradiction by calling every hour within twelve hours of the onset proxy positive.
+
+**Removing post-onset hours costs little.** A frozen model can score well on the persistent label by recognizing physiology that has already declared itself. Re-summarizing the existing frozen scores over pre-onset hours only, refitting nothing, costs 0.0094 AUROC [0.0058, 0.0128] on the random split and 0.0115 [0.0080, 0.0148] across sites. The concern is real and the interval excludes zero, but it is small, because these records end close to the onset proxy: only 1,830 of 308,791 hours and 3,429 of 760,117 lie at or after it. At horizon 6 the event label restricted to pre-onset hours is provably identical to the persistent label restricted to the same hours, and `basis` verifies this elementwise, so that difference is attributable to the dropped hours alone and not to a change of label definition.
+
+**Retraining on the corrected target did not buy earlier warning per alert hour.** This was the expected result and it did not hold. At the default 2% budget on the random split, early-window coverage went from 25.4% [21.3, 29.8] to 22.8% [19.0, 26.7]. Because the two runs selected different model families, the comparison was repeated with the family held fixed and the splits identical, and the direction survived. Nominal budgets also do not produce equal test alert loads across targets, so thresholds were swept over a prespecified validation budget grid and both curves interpolated to common burdens. No test hour informs any threshold.
+
+| Matched on | Comparisons | Event target better | Mean difference | Range |
+|---|---:|---:|---:|---:|
+| Alert hours per 100 | 11 | 1 | -1.1pp | -3.3 to +1.9 |
+| Nonsepsis patients alerted | 12 | 12 | +4.8pp | +1.5 to +9.8 |
+
+**The target changes how a fixed alert budget is spread, not how much it detects.** Matched on alert hours the persistent target is equal or slightly ahead almost everywhere. Matched on how many patients are disturbed, the event target is ahead in every one of twelve comparisons, across both splits and both model families. It concentrates the same alert hours onto fewer distinct patients and fewer episodes: on the random split at a 2% budget, boosting alerts on 0.92% of nonsepsis patients against 1.80%, with 0.276 episodes per 100 hours against 0.414.
+
+Which of those two denominators is the real constraint is a review-capacity question, and it remains the case that nobody qualified has stated one. **Neither target is therefore preferable on this evidence**; they are preferable under different and unstated denominators. The site-split result at the default budget looks like a clear win for the event target, 24.7% [21.8, 27.8] against 19.3% [16.7, 22.0], but that comparison is not like-for-like: it spends 2.51 alert hours per 100 against 1.44. The matched-burden table is the honest version and shows a smaller, denominator-dependent effect.
+
+The official PhysioNet utility is defined against the persistent label and its timing, so it is left undefined for this target rather than recomputed against a different one, and `--threshold utility` is refused. Every recorded hour is still scored and saved, so the timing, workload, replay and dashboard tools read complete records under either target. Local outputs: `artifacts/event12-*-42`, `artifacts/basis-full-*-42`, `artifacts/sweep-*.csv` and `artifacts/matched-burden.csv`.
+
+## Subgroup contrasts replace the uncontrolled descriptions
+
+Previous releases described each subgroup level on its own with no intervals and no multiplicity control, and said so. That is the combination that produced the disparity findings the full-cohort release had to retract. The new `contrasts` command states the comparisons instead: a descriptor family fixed in code before any held-out hour is read, one level-versus-rest AUROC difference per level with a whole-patient bootstrap interval, and Holm-Bonferroni across the family. A descriptor with exactly two levels contributes one contrast rather than two mirrored ones, which would otherwise inflate the family and make the correction needlessly conservative.
+
+**No contrast survives correction on any run tested**, across nine contrasts per random-split run and eight per site-held-out run. The site descriptor contributes nothing to the latter because that test cohort is a single site.
+
+| Run | Closest contrast | AUROC vs rest | 95% interval | p | p after Holm |
+|---|---|---:|---:|---:|---:|
+| Random, persistent | `age_band/age_lt_50` | +0.0309 | [+0.002, +0.061] | 0.038 | 0.342 |
+| Random, event target | `unit/unit_unrecorded` | +0.0366 | [+0.004, +0.072] | 0.036 | 0.324 |
+| Site, persistent | `unit/unit_unrecorded` | +0.0368 | [+0.011, +0.065] | 0.008 | 0.064 |
+| Site, event target | `age_band/age_lt_50` | -0.0387 | [-0.071, -0.005] | 0.030 | 0.240 |
+
+All four of these unadjusted intervals exclude zero, and the correction is precisely what stops them being read as findings. `age_band/age_lt_50` illustrates why: +0.0309 on the random split, -0.0250 [-0.056, +0.009] on the site split, and -0.0387 [-0.071, -0.005] on the site split under the event target. The same recorded level, opposite directions, twice with an interval that excludes zero. That is what resampling noise looks like when it is scanned across a family. This corroborates the full-cohort retraction recorded below, where subgroup disparities reported from a 2,000-patient subsample did not survive the full cohort.
+
+Because it reads a frozen run rather than running inside training, this applies to runs trained before it existed, including the previously reported full-cohort runs. It remains a post-hoc description of one cohort and is not subgroup validation.
+
+## Verification for these additions
+
+All 54 tests pass, up from 28. New coverage: the horizon-6 label identity and that it holds only at that horizon, pre-onset masking and exclusion of unrecoverable transitions, the proof that masking features after the fact equals truncating the record first (without which post-onset physiology could leak backwards into fitted hours), Holm against its step-down definition, planted and null subgroup differences, binary-descriptor deduplication, and both new commands end to end.
+
+Re-running the persistent target under the new code reproduces both frozen full-cohort runs exactly, across 309,558 and 761,995 predictions, with identical AUROC, average precision, threshold and utility. Every module hash recorded in each new run matches the shipped code, so these numbers are reproducible from a clean checkout.
+
 ## Early-warning evaluation and visual replay
 
 The existing frozen boosting scores now have patient-level timing evaluation. No model was retrained and no threshold was changed. The onset proxy is the first observed 0-to-1 label transition plus six hours, following the [dataset label definition](https://physionet.org/content/challenge-2019/1.0.0/). It is derived from the existing target, not an independent clinical event.

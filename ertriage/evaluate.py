@@ -222,3 +222,116 @@ def bootstrap(y, p, threshold, ids, seed=42, draws=1000, level=.95):
               dict(low=float(np.percentile(values, 100 * half)),
                    high=float(np.percentile(values, 100 * (1 - half))), draws=len(values)))
         for key, values in collected.items()})
+
+
+#: Descriptor families whose levels form the prespecified contrast family. Fixed in
+#: code, before any held-out hour is scored, so the family cannot grow after seeing
+#: results. Adding a descriptor here changes the multiplicity correction for all of them.
+CONTRAST_FAMILY = ("site", "age_band", "gender", "unit")
+
+
+def holm(pvalues):
+    """Holm-Bonferroni adjusted p-values, returned in the input order.
+
+    Controls the probability of at least one false rejection across the whole
+    family under any dependence structure. Step-down and monotone: an adjusted
+    value never falls below one ranked ahead of it.
+    """
+    p = np.asarray(pvalues, dtype=float)
+    if p.ndim != 1 or not len(p) or not np.isfinite(p).all() or ((p < 0) | (p > 1)).any():
+        raise ValueError("Holm correction needs finite p-values in [0, 1]")
+    adjusted, running = np.empty(len(p)), 0.
+    for rank, index in enumerate(np.argsort(p)):
+        running = max(running, (len(p) - rank) * p[index])
+        adjusted[index] = min(1., running)
+    return adjusted
+
+
+def subgroup_contrasts(y, p, ids, families, seed=42, draws=1000, level=.95):
+    """Level-versus-rest AUROC differences with patient-bootstrap intervals and Holm control.
+
+    The previous subgroup report described each level on its own and said so:
+    no intervals and no multiplicity control, so a level that looked worse could
+    not be told apart from small-sample noise, and scanning many levels made some
+    extreme one nearly certain. This states the comparisons instead.
+
+    Every level of every descriptor in `families` is one contrast: the model's
+    AUROC on that level's patients minus its AUROC on all remaining patients. A
+    descriptor with exactly two levels contributes a single contrast, because
+    level-versus-rest for one of them is the same comparison as for the other
+    with the sign flipped; counting both would inflate the family size and make
+    the correction needlessly conservative. Whole patients are resampled once per
+    draw and every contrast is recomputed on that same draw, so the contrasts
+    share resampling noise and stay comparable. The two-sided bootstrap p-value
+    is the usual proportion of draws on the wrong side of zero, doubled, and
+    floored at one draw; it is approximate, and Holm is applied across the entire
+    family at once.
+
+    This is still one held-out cohort described after the fact. A difference
+    that survives correction is a difference in this cohort's recorded data, not
+    evidence about care, deployment, or any other population.
+    """
+    y, p, ids = np.asarray(y), np.asarray(p, dtype=float), np.asarray(ids)
+    groups = patient_groups(ids)
+    parts = [np.arange(part.start, part.stop) for part in groups]
+    contrasts = []
+    for family, levels in families.items():
+        assigned = np.array([str(levels.get(ids[part.start], "unknown")) for part in groups])
+        names = sorted(set(assigned))
+        if len(names) < 2:  # a single-level descriptor has nothing to contrast against
+            continue
+        # A binary descriptor asks one question, so only its first level is tested.
+        for name in names[:1] if len(names) == 2 else names:
+            take = assigned == name
+            rows = np.zeros(len(y), dtype=bool)
+            for part, keep in zip(groups, take):
+                if keep:
+                    rows[part] = True
+            contrasts.append(dict(family=family, level=name, patients=int(take.sum()), member=rows))
+    if not contrasts:
+        return []
+
+    def difference(index, member):
+        inside, outside = index[member[index]], index[~member[index]]
+        if not len(inside) or not len(outside):
+            return None
+        if len(np.unique(y[inside])) != 2 or len(np.unique(y[outside])) != 2:
+            return None
+        return roc_auc_score(y[inside], p[inside]) - roc_auc_score(y[outside], p[outside])
+
+    every = np.arange(len(y))
+    for contrast in contrasts:
+        contrast["draws_values"] = []
+        contrast["observed"] = difference(every, contrast["member"])
+    rng = np.random.default_rng(seed)
+    for _ in range(draws):
+        index = np.concatenate([parts[i] for i in rng.integers(0, len(parts), len(parts))])
+        for contrast in contrasts:
+            value = difference(index, contrast["member"])
+            if value is not None:
+                contrast["draws_values"].append(value)
+    half = (1 - level) / 2
+    usable = [c for c in contrasts if c["observed"] is not None and len(c["draws_values"]) >= draws // 2]
+    raw = []
+    for contrast in usable:
+        values = np.asarray(contrast["draws_values"])
+        # Two-sided bootstrap p-value, floored at one draw rather than reported as zero.
+        tail = min((values <= 0).mean(), (values >= 0).mean())
+        raw.append(min(1., max(2 * tail, 1 / len(values))))
+    adjusted = holm(raw) if raw else np.array([])
+    report = []
+    for contrast, unadjusted, corrected in zip(usable, raw, adjusted):
+        values = np.asarray(contrast["draws_values"])
+        report.append(dict(
+            family=contrast["family"], level=contrast["level"], patients=contrast["patients"],
+            auroc_difference=float(contrast["observed"]), draws=len(values), seed=seed, level_ci=level,
+            low=float(np.percentile(values, 100 * half)), high=float(np.percentile(values, 100 * (1 - half))),
+            p_value=float(unadjusted), p_value_holm=float(corrected),
+            significant_at_05_after_holm=bool(corrected < .05)))
+    skipped = [dict(family=c["family"], level=c["level"], patients=c["patients"])
+               for c in contrasts if c not in usable]
+    return dict(method="level_versus_rest_auroc", family_size=len(report), seed=seed, draws=draws,
+                correction="holm_bonferroni", contrasts=report, undefined_contrasts=skipped,
+                note="Prespecified family, fixed in code before scoring. One held-out cohort, "
+                     "described after the fact. Surviving correction means a difference in this "
+                     "cohort's recorded data, not evidence about care or deployment.")

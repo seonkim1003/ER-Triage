@@ -22,6 +22,8 @@ from .data import read_patient, features, patient_attributes
 from .evaluate import (bootstrap, calibration, normalized_utility, paired_difference, patient_groups,
                        recalibrate, recalibrator, subgroup_metrics, utility_by_patient, utility_hours,
                        utility_of)
+from .target import HORIZON, event_target
+from .target import METHOD as EVENT_METHOD
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "2")
 
@@ -111,7 +113,41 @@ def select_model(scores, y, ids, order=SELECTION_ORDER, seed=42, draws=1000):
                         average_precision_margins=margins)
 
 
-def metrics(y, p, threshold, ids):
+def target_view(dfs, patients, target, horizon):
+    """Full-record arrays plus the rows the chosen target actually fits and scores.
+
+    Features are causal, so a row never depends on a later row and masking after
+    the fact is identical to truncating the record first; a test asserts it. The
+    full arrays are kept because every recorded hour is still scored and saved,
+    which is what the timing, workload and replay tools read. Post-onset hours
+    are simply never fitted on and never credited.
+    """
+    x = pd.concat([features(df) for df in dfs], ignore_index=True)
+    y = np.concatenate([df.SepsisLabel.to_numpy(dtype=int) for df in dfs])
+    ids = np.repeat(np.asarray(patients), [len(df) for df in dfs])
+    hours = np.concatenate([df.ICULOS.to_numpy() for df in dfs])
+    if target == "persistent":
+        return x, y, ids, hours, np.arange(len(y)), y, {}
+    if target != "event":
+        raise ValueError(f"Unknown target: {target}")
+    labels, keep, counts = [], [], {}
+    for df in dfs:
+        event, mask, status = event_target(df.SepsisLabel.to_numpy(dtype=int), horizon)
+        counts[status] = counts.get(status, 0) + 1
+        if event is None:  # transition unrecoverable; excluded from fitting and scoring
+            event, mask = np.zeros(len(df), dtype=int), np.zeros(len(df), dtype=bool)
+        labels.append(event)
+        keep.append(mask)
+    return x, y, ids, hours, np.flatnonzero(np.concatenate(keep)), np.concatenate(labels), counts
+
+
+def fitted(view):
+    """Features, target labels and identifiers restricted to the rows the target uses."""
+    x, _, ids, _, use, y, _ = view
+    return x.iloc[use].reset_index(drop=True), y[use], ids[use]
+
+
+def metrics(y, p, threshold, ids, utility=True):
     y, p = np.asarray(y), np.asarray(p, dtype=float)
     pred = p >= threshold
     tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
@@ -125,12 +161,17 @@ def metrics(y, p, threshold, ids):
                 confusion=dict(tn=int(tn), fp=int(fp), fn=int(fn), tp=int(tp)),
                 alert_hours_per_100=float(100 * pred.mean()),
                 nonsepsis_patients_with_any_alert=float(negative.alert.mean()) if len(negative) else None,
-                normalized_utility=normalized_utility(*utility_by_patient(y, pred, patient_groups(ids))),
+                # The official utility is defined against the persistent label and its timing, so it
+                # is left undefined rather than recomputed on a re-anchored target.
+                normalized_utility=(normalized_utility(*utility_by_patient(y, pred, patient_groups(ids)))
+                                    if utility else None),
                 calibration=calibration(y, p))
 
 
 def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
-          rule="budget", budget=2., selection="stable"):
+          rule="budget", budget=2., selection="stable", target="persistent", horizon=HORIZON):
+    if target == "event" and rule == "utility":
+        raise ValueError("The official utility threshold rule is defined against the persistent label")
     root, output = Path(root), Path(output)
     if output.exists():
         raise ValueError("Use a new output directory to preserve previous experiments")
@@ -155,16 +196,17 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
         raise ValueError("Need at least 10 patients of each class; increase --limit")
     splits = split_patients(manifest, seed, scheme)
     output.mkdir(parents=True)
-    arrays = {}
+    arrays, target_counts = {}, {}
     for name, subset in splits.items():
         if subset.ever_sepsis.nunique() != 2:
             raise ValueError(f"Split '{name}' lacks both classes; increase --limit or use --split random")
         subset.sort_values("patient").to_csv(output / f"{name}_patients.csv", index=False)
         dfs = [frames[p] for p in subset.patient]
-        arrays[name] = (pd.concat([features(df) for df in dfs], ignore_index=True),
-                        np.concatenate([df.SepsisLabel.to_numpy(dtype=int) for df in dfs]),
-                        np.repeat(subset.patient.to_numpy(), [len(df) for df in dfs]))
-    x, y, _ = arrays["train"]
+        arrays[name] = target_view(dfs, subset.patient.to_numpy(), target, horizon)
+        target_counts[name] = arrays[name][6]
+        if not fitted(arrays[name])[1].any():
+            raise ValueError(f"Split '{name}' has no positive hour under the '{target}' target")
+    x, y, _ = fitted(arrays["train"])
     models = {
         "prevalence": DummyClassifier(strategy="prior"),
         "logistic": make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler(), LogisticRegression(max_iter=1000, random_state=seed)),
@@ -173,13 +215,26 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
     descriptors = ["site", "age_band", "gender", "unit"]
     levels = {name: splits["test"].set_index("patient")[name].to_dict() for name in descriptors}
     report = dict(seed=seed, split=scheme, threshold_rule=rule, selection_rule=selection,
-                  selected_patients=len(paths), available_patients=len(list(root.glob("site_*/*.psv"))))
+                  target=target, selected_patients=len(paths),
+                  available_patients=len(list(root.glob("site_*/*.psv"))))
+    if target == "event":
+        report.update(horizon_hours=horizon, target_method=EVENT_METHOD,
+                      target_patient_status=target_counts,
+                      target_fitted_hours={k: int(len(fitted(v)[1])) for k, v in arrays.items()},
+                      target_note="Every recorded hour is still scored and saved so the timing, "
+                                  "workload and replay tools read a complete record. Hours at or "
+                                  "after the onset proxy are excluded from fitting, thresholding "
+                                  "and reported metrics only.")
     if rule == "budget":
         report["alert_budget_per_100"] = budget
     report.update(python=platform.python_version(), sklearn=sklearn.__version__, models={},
                   scope="ICU retrospective development only; not ER validation",
-                  subgroups_note="Descriptive splits of one held-out cohort by recorded administrative"
-                                 " fields; no intervals, no multiplicity control, not subgroup validation.",
+                  subgroups_note="Per-level descriptions of one held-out cohort by recorded"
+                                 " administrative fields, with no intervals and no multiplicity"
+                                 " control. For comparisons, run the 'contrasts' command: it states"
+                                 " a prespecified family, gives every level-versus-rest difference a"
+                                 " patient-bootstrap interval, and applies Holm across the family."
+                                 " Neither is subgroup validation.",
                   recalibration_note="Platt map fitted on validation predictions only and applied unchanged"
                                      " to held-out hours; monotone, so alerts and ranking are unchanged.")
     report["source_sha256"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -187,14 +242,15 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
     provenance = root / "provenance.json"
     if provenance.exists():
         report["data_provenance_sha256"] = hashlib.sha256(provenance.read_bytes()).hexdigest()
+    official = target == "persistent"
     with threadpool_limits(limits=2):
         for name, model in models.items():
             print(f"Fitting {name}: {len(y)} training hours", flush=True)
             model.fit(x, y)
-            vx, vy, vi = arrays["validation"]
+            vx, vy, vi = fitted(arrays["validation"])
             vp = model.predict_proba(vx)[:, 1]
             threshold = threshold_for(vy, vp, vi, rule=rule, budget=budget)
-            report["models"][name] = {"validation": metrics(vy, vp, threshold, vi)}
+            report["models"][name] = {"validation": metrics(vy, vp, threshold, vi, official)}
             # Recalibration is fitted on validation predictions only and frozen before test hours.
             fit = recalibrator(vy, vp)
             if fit:
@@ -203,7 +259,7 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
             joblib.dump(dict(model=model, threshold=threshold, feature_columns=list(x.columns),
                              recalibration=fit), output / f"{name}.joblib")
         if selection == "stable":
-            vx, vy, vi = arrays["validation"]
+            vx, vy, vi = fitted(arrays["validation"])
             scores = {name: model.predict_proba(vx)[:, 1] for name, model in models.items()}
             selected, decision = select_model(scores, vy, vi, seed=seed, draws=draws)
         else:
@@ -212,21 +268,23 @@ def train(root, output, limit=2000, seed=42, scheme="random", draws=1000,
         report["selected_model"] = selected
         report["selection"] = decision
         # Selection and thresholds are frozen before examining test outcomes.
-        tx, ty, ti = arrays["test"]
+        tx_all, y_all, ids_all, hours_all, use, _, _ = arrays["test"]
+        tx, ty, ti = fitted(arrays["test"])
         for name, model in models.items():
-            p = model.predict_proba(tx)[:, 1]
+            # Score every recorded hour, then report only the rows this target credits.
+            p_all = model.predict_proba(tx_all)[:, 1]
+            p = p_all[use]
             threshold = report["models"][name]["validation"]["threshold"]
-            report["models"][name]["test"] = metrics(ty, p, threshold, ti)
+            report["models"][name]["test"] = metrics(ty, p, threshold, ti, official)
             report["models"][name]["test"]["bootstrap"] = bootstrap(ty, p, threshold, ti, seed=seed, draws=draws)
             report["models"][name]["test"]["subgroups"] = {
                 name_: subgroup_metrics(ty, p, threshold, ti, level) for name_, level in levels.items()}
             fit = report["models"][name]["recalibration"]
-            columns = dict(patient=ti, hour=np.concatenate([frames[pid].ICULOS.to_numpy()
-                                                          for pid in splits["test"].patient]),
-                           label=ty, score=p)
+            columns = dict(patient=ids_all, hour=hours_all, label=y_all, score=p_all)
             if fit:
-                calibrated = recalibrate(fit, p)
+                calibrated = recalibrate(fit, p_all)
                 columns["calibrated_score"] = calibrated
+                calibrated = calibrated[use]
                 report["models"][name]["test_recalibrated"] = dict(
                     threshold=fit["mapped_threshold"], brier=float(brier_score_loss(ty, calibrated)),
                     alerts_identical=bool(np.array_equal(calibrated >= fit["mapped_threshold"], p >= threshold)),

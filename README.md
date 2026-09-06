@@ -131,19 +131,67 @@ Replay accepts held-out patients only and recomputes each prediction from the vi
 
 Replay also prints a `calibrated_score` column when the run recorded a recalibration map. Because that map is monotone, it changes no review event. An illustrative policy schedules review after 1, 2, or 4 hours based on score, score increase, and observation age. Any vital absent or at least four hours old forces a one-hour review. Review events can occur early when scores rise. All recorded hourly measurements still arrive in this simulation: the policy changes review events, **not measurement acquisition**, and cannot estimate outcomes under a different monitoring schedule. It does not make treatment, triage, discharge, or real-world timing recommendations. Neither policy thresholds nor review intervals have clinical validation.
 
+### Event-anchored target
+
+The dataset label is *persistent*: once it turns 1 it stays 1 until the record ends. Training and
+scoring on it mixes "will this patient deteriorate?" with "is this patient already deteriorating?".
+It also contradicts the early-warning metric above: in the `[onset-12, onset-6]` window that metric
+scores, the persistent label calls almost every hour negative, so the model is fitted to stay silent
+exactly where it is then measured.
+
+`--target event` replaces that label. An hour is positive when the onset proxy falls within the next
+`--horizon` hours, and every hour at or after the onset proxy is dropped from fitting, thresholding
+and reported metrics. Excluded are records whose label is nonpersistent or already positive at the
+first recorded hour, because their transition cannot be recovered; records whose onset proxy falls
+past the end of the stay are kept, since all of their hours are genuinely pre-onset. Every recorded
+hour is still scored and written to `test_predictions.csv`, so the timing, workload, replay and
+dashboard tools read a complete record either way.
+
+```powershell
+.\.venv\Scripts\python.exe -m ertriage train --out artifacts/event12-random-42 --limit 0 --split random --target event --horizon 12
+.\.venv\Scripts\python.exe -m ertriage basis --run artifacts/full-random-42 --out artifacts/basis-full-random-42
+.\.venv\Scripts\python.exe -m ertriage contrasts --run artifacts/full-random-42 --out artifacts/contrasts-full-random-42
+```
+
+The official PhysioNet utility is defined against the persistent label and its timing, so it is left
+undefined for this target rather than recomputed on a different one. `--threshold utility` is refused
+for the same reason.
+
+`basis` re-summarizes a frozen run's saved scores twice, over all recorded hours against the
+persistent label and over pre-onset hours only against the event label, with a whole-patient
+bootstrap on the difference. It refits nothing and loads no `.joblib`. At horizon 6 the two labels
+coincide on pre-onset hours by construction, which the report verifies elementwise; the difference
+there measures the dropped post-onset hours and nothing else.
+
+### Prespecified subgroup contrasts
+
+The per-level subgroup descriptions in a training report carry no intervals and no multiplicity
+control, and are labelled that way. `contrasts` states the comparisons instead: a descriptor family
+fixed in code before any held-out hour is read, one level-versus-rest AUROC difference per level with
+a whole-patient bootstrap interval, and Holm-Bonferroni across the whole family. A descriptor with
+exactly two levels contributes one contrast, not two mirrored ones. It reads a frozen run, so it can
+be applied to runs trained before it existed. It remains a post-hoc description of one cohort.
+
 ## Layout
 
 - `ertriage/data.py`: download, schema checks and causal features.
 - `ertriage/model.py`: patient splits, baselines, threshold rules, model selection and evaluation.
 - `ertriage/evaluate.py`: official utility scoring, calibration, validation-fitted recalibration, subgroup description, selection margins and patient bootstrap.
+- `ertriage/target.py`: the event-anchored prediction target and its pre-onset mask.
+- `ertriage/basis.py`: re-scores a frozen run on the pre-onset basis without refitting.
+- `ertriage/contrasts.py`: prespecified subgroup contrasts with intervals and Holm correction.
 - `ertriage/replay.py`: prefix-only replay and illustrative cadence.
 - `ertriage/workload.py`: held-out review workload, artifact checks, fixed schedule comparisons and paired patient-bootstrap intervals.
 - `ertriage/history.py`: verified access to frozen held-out patient histories.
 - `ertriage/early_warning.py`: onset-proxy timing, missed windows, false alerts, repeated episodes and patient-bootstrap intervals.
 - `ertriage/dashboard.py` and `ertriage/static/`: local browser replay and evaluation viewer.
 - `tests/test_early_warning.py`: timing boundaries, exclusions, denominator checks, artifact checks and local HTTP tests.
+- `tests/test_target.py`: the horizon-6 label identity, pre-onset masking, and the proof that
+  masking late equals truncating first.
+- `tests/test_contrasts.py`: Holm correction, planted and null subgroup differences.
+- `tests/test_basis.py`: pre-onset re-scoring, the horizon-6 identity, and contrast artifacts.
 - `tests/test_workload.py`: budget ties, causal scheduling, workload intervals and artifact-integrity regression tests.
 - `tests/test_pipeline.py`: leakage, split, utility, calibration, recalibration, subgroup, threshold-rule, selection, bootstrap, validation and policy regression tests.
 - `artifacts/`: local run outputs; `data/`: local records and download provenance.
 
-Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Remaining work: a review capacity stated by someone qualified to state one, cross-site recalibration that actually transfers, subgroup comparisons stated in advance with intervals and multiplicity control, a target that is an isolated future event rather than the provided persistent label, clinician-designed policies, and genuinely ER-specific retrospective validation.
+Only load this project's trusted local `.joblib` files: the serialization format can execute code. Site-held-out evaluation, patient-bootstrap uncertainty, calibration assessment, held-out recalibration, subgroup description, multi-seed sensitivity and official utility scoring are now implemented. Prespecified subgroup contrasts with intervals and Holm correction, and an event-anchored target that is not the provided persistent label, are now implemented. Remaining work: a review capacity stated by someone qualified to state one, cross-site recalibration that actually transfers, clinician-designed policies, and genuinely ER-specific retrospective validation.

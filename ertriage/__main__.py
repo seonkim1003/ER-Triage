@@ -6,6 +6,9 @@ from .replay import replay
 from .workload import workload
 from .early_warning import early_warning
 from .dashboard import dashboard
+from .basis import basis
+from .contrasts import contrasts
+from .target import HORIZON
 
 
 def main():
@@ -30,6 +33,11 @@ def main():
     t.add_argument("--select", choices=["ap", "stable"], default="stable",
                    help="Model selection: validation average precision, or step back to the simplest"
                         " model a paired validation bootstrap cannot distinguish from the leader")
+    t.add_argument("--target", choices=["persistent", "event"], default="persistent",
+                   help="persistent dataset label, or an event-anchored label that is positive only"
+                        " within --horizon hours before the onset proxy and drops post-onset hours")
+    t.add_argument("--horizon", type=int, default=HORIZON,
+                   help="Event-target horizon in hours before the onset proxy")
     r = sub.add_parser("replay")
     r.add_argument("--data", default="data/physionet2019")
     r.add_argument("--run", default="artifacts/baseline")
@@ -46,6 +54,20 @@ def main():
     e.add_argument("--out", required=True)
     e.add_argument("--seed", type=int, default=42)
     e.add_argument("--draws", type=int, default=1000)
+    b = sub.add_parser("basis", help="Re-score a frozen run on the event-anchored pre-onset basis")
+    b.add_argument("--data", default="data/physionet2019")
+    b.add_argument("--run", required=True)
+    b.add_argument("--out", required=True)
+    b.add_argument("--horizon", type=int, default=HORIZON,
+                   help="Hours before the onset proxy that count as positive")
+    b.add_argument("--seed", type=int, default=42)
+    b.add_argument("--draws", type=int, default=1000)
+    k = sub.add_parser("contrasts", help="Prespecified subgroup contrasts with Holm correction")
+    k.add_argument("--data", default="data/physionet2019")
+    k.add_argument("--run", required=True)
+    k.add_argument("--out", required=True)
+    k.add_argument("--seed", type=int, default=42)
+    k.add_argument("--draws", type=int, default=1000)
     v = sub.add_parser("dashboard", help="Serve a local read-only visual patient replay")
     v.add_argument("--data", default="data/physionet2019")
     v.add_argument("--run", required=True)
@@ -64,8 +86,10 @@ def main():
                 parser.error("--draws must be positive")
             if not 0 < args.alert_budget <= 100:
                 parser.error("--alert-budget must be within (0, 100] alert hours per 100")
+            if args.horizon < 1:
+                parser.error("--horizon must be a positive whole number of hours")
             train(args.data, args.out, args.limit, args.seed, args.split, args.draws,
-                  args.threshold, args.alert_budget, args.select)
+                  args.threshold, args.alert_budget, args.select, args.target, args.horizon)
         elif args.command == "workload":
             if args.draws < 1:
                 parser.error("--draws must be positive")
@@ -74,6 +98,16 @@ def main():
             if args.draws < 1:
                 parser.error("--draws must be positive")
             early_warning(args.data, args.run, args.out, args.seed, args.draws)
+        elif args.command == "basis":
+            if args.draws < 1:
+                parser.error("--draws must be positive")
+            if args.horizon < 1:
+                parser.error("--horizon must be a positive whole number of hours")
+            basis(args.data, args.run, args.out, args.horizon, args.seed, args.draws)
+        elif args.command == "contrasts":
+            if args.draws < 1:
+                parser.error("--draws must be positive")
+            contrasts(args.data, args.run, args.out, args.seed, args.draws)
         elif args.command == "dashboard":
             if not 1 <= args.port <= 65535:
                 parser.error("--port must be within 1..65535")
